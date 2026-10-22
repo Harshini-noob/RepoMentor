@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 from fastapi import FastAPI
 
+from app.api.analysis import router as analysis_router
 from app.api.projects import router as projects_router
 from app.core.db import get_db
 from app.core.repositories import init_indexes
@@ -21,6 +22,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="RepoMentor API", lifespan=lifespan)
 app.include_router(projects_router)
+app.include_router(analysis_router)
 
 
 @app.get("/health")

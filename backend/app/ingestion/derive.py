@@ -189,11 +189,34 @@ def detect_js_ts_routes_and_components(file_path: str, content: str) -> list[Der
 
 
 # ---------------------------------------------------------------------------
+# Comment checking helper
+# ---------------------------------------------------------------------------
+def _is_comment_line(line: str) -> bool:
+    """Check if a line is a full-line comment in Python, JS, or TS."""
+    stripped = line.strip()
+    return (
+        stripped.startswith("#")
+        or stripped.startswith("//")
+        or stripped.startswith("/*")
+        or stripped.startswith("*")
+    )
+
+
+def _strip_inline_comment(line: str) -> str:
+    """Strip inline # or // comments from a line, preserving code."""
+    if "#" in line:
+        line = line.split("#", 1)[0]
+    if "//" in line:
+        line = line.split("//", 1)[0]
+    return line
+
+
+# ---------------------------------------------------------------------------
 # 3. Database Usage Detector
 # ---------------------------------------------------------------------------
 def detect_database_usage(file_path: str, content: str) -> list[DerivedFact]:
     """
-    Detect database library imports or connection strings (mongodb, motor, sqlalchemy, sqlite3, prisma, etc.).
+    Detect database library imports or connection strings (mongodb, motor, sqlalchemy, sqlite3, prisma, supabase, psycopg, asyncpg, etc.).
     """
     facts: list[DerivedFact] = []
     db_patterns = [
@@ -202,14 +225,22 @@ def detect_database_usage(file_path: str, content: str) -> list[DerivedFact]:
         ("mongoose", re.compile(r"\b(require\(['\"]mongoose['\"]|from\s+['\"]mongoose['\"])")),
         ("mongodb_conn", re.compile(r"mongodb(?:\+srv)?://[^\s'\"`]+")),
         ("sqlalchemy", re.compile(r"\b(import\s+sqlalchemy\b|from\s+sqlalchemy\b)")),
-        ("psycopg2", re.compile(r"\b(import\s+psycopg2\b|from\s+psycopg2\b)")),
         ("sqlite3", re.compile(r"\b(import\s+sqlite3\b|from\s+sqlite3\b|sqlite:///[^\s'\"`]+)")),
         ("prisma", re.compile(r'(?:@prisma/client|from\s+prisma\b|import\s+prisma\b)')),
+        ("supabase", re.compile(r"\b(import\s+supabase\b|from\s+supabase\b|create_client\s*\()")),
+        ("psycopg", re.compile(r"\b(import\s+psycopg\b|from\s+psycopg\b)")),
+        ("psycopg2", re.compile(r"\b(import\s+psycopg2\b|from\s+psycopg2\b)")),
+        ("asyncpg", re.compile(r"\b(import\s+asyncpg\b|from\s+asyncpg\b)")),
     ]
 
     for line_idx, line in enumerate(content.splitlines(), start=1):
+        if _is_comment_line(line):
+            continue
+        code_line = _strip_inline_comment(line)
         for name, pattern in db_patterns:
-            if pattern.search(line):
+            # Connection string patterns may need the full line (e.g. mongodb:// contains //)
+            target = line if "conn" in name or "sqlite:///" in line else code_line
+            if pattern.search(target):
                 facts.append(
                     DerivedFact(
                         kind="database",
@@ -229,7 +260,7 @@ def detect_database_usage(file_path: str, content: str) -> list[DerivedFact]:
 # ---------------------------------------------------------------------------
 def detect_ml_usage(file_path: str, content: str | None) -> list[DerivedFact]:
     """
-    Detect ML framework imports (torch, tensorflow, sklearn, transformers) and model weights files.
+    Detect ML framework imports (torch, tensorflow, sklearn, transformers, sentence_transformers) and model weights files.
     """
     facts: list[DerivedFact] = []
     _, ext = os.path.splitext(file_path.lower())
@@ -254,10 +285,14 @@ def detect_ml_usage(file_path: str, content: str | None) -> list[DerivedFact]:
             ("tensorflow", re.compile(r"\b(import\s+tensorflow\b|from\s+tensorflow\b)")),
             ("sklearn", re.compile(r"\b(import\s+sklearn\b|from\s+sklearn\b)")),
             ("transformers", re.compile(r"\b(import\s+transformers\b|from\s+transformers\b)")),
+            ("sentence_transformers", re.compile(r"\b(import\s+sentence_transformers\b|from\s+sentence_transformers\b)")),
         ]
-        for line_idx, line in enumerate(content.splitlines(), start=1):
+        for line_idx, raw_line in enumerate(content.splitlines(), start=1):
+            if _is_comment_line(raw_line):
+                continue
+            code_line = _strip_inline_comment(raw_line)
             for name, pattern in ml_patterns:
-                if pattern.search(line):
+                if pattern.search(code_line):
                     facts.append(
                         DerivedFact(
                             kind="ml",
@@ -265,9 +300,123 @@ def detect_ml_usage(file_path: str, content: str | None) -> list[DerivedFact]:
                             file_path=file_path,
                             line_start=line_idx,
                             line_end=line_idx,
-                            details={"import_statement": line.strip()},
+                            details={"import_statement": raw_line.strip()},
                         )
                     )
+
+    return facts
+
+
+# ---------------------------------------------------------------------------
+# 4b. LLM Provider Detector
+# ---------------------------------------------------------------------------
+def detect_llm_providers(file_path: str, content: str | None) -> list[DerivedFact]:
+    """
+    Detect LLM provider SDK imports (openai, anthropic, google.genai, groq, cohere, mistralai, ollama).
+    """
+    if not content:
+        return []
+
+    facts: list[DerivedFact] = []
+    llm_patterns = [
+        ("openai", re.compile(r"\b(import\s+openai\b|from\s+openai\b|require\(['\"]openai['\"]|from\s+['\"]openai['\"])")),
+        ("anthropic", re.compile(r"\b(import\s+anthropic\b|from\s+anthropic\b|require\(['\"]@?anthropic-ai['\"]|from\s+['\"]@?anthropic-ai['\"])")),
+        ("google_genai", re.compile(r"\b(import\s+google\.genai\b|from\s+google(?:\.genai)?\s+import\s+genai\b|from\s+google\s+import\s+genai\b|require\(['\"]@google/genai['\"]|from\s+['\"]@google/genai['\"]|google-genai)")),
+        ("groq", re.compile(r"\b(import\s+groq\b|from\s+groq\b|require\(['\"]groq-sdk['\"]|from\s+['\"]groq-sdk['\"])")),
+        ("cohere", re.compile(r"\b(import\s+cohere\b|from\s+cohere\b|require\(['\"]cohere-ai['\"]|from\s+['\"]cohere-ai['\"])")),
+        ("mistralai", re.compile(r"\b(import\s+mistralai\b|from\s+mistralai\b|require\(['\"]@mistralai/mistralai['\"]|from\s+['\"]@mistralai/mistralai['\"])")),
+        ("ollama", re.compile(r"\b(import\s+ollama\b|from\s+ollama\b|require\(['\"]ollama['\"]|from\s+['\"]ollama['\"])")),
+    ]
+
+    for line_idx, raw_line in enumerate(content.splitlines(), start=1):
+        if _is_comment_line(raw_line):
+            continue
+        code_line = _strip_inline_comment(raw_line)
+        for name, pattern in llm_patterns:
+            if pattern.search(code_line):
+                facts.append(
+                    DerivedFact(
+                        kind="llm_provider",
+                        name=name,
+                        file_path=file_path,
+                        line_start=line_idx,
+                        line_end=line_idx,
+                        details={"provider": name, "matched_line": raw_line.strip()},
+                    )
+                )
+
+    return facts
+
+
+# ---------------------------------------------------------------------------
+# 4c. UI App Detector (Streamlit, Gradio, Next.js / React entries)
+# ---------------------------------------------------------------------------
+def detect_ui_apps(file_path: str, content: str | None) -> list[DerivedFact]:
+    """
+    Detect UI frameworks / applications (Streamlit, Gradio, Next.js / React entry files).
+    """
+    facts: list[DerivedFact] = []
+    norm_path = file_path.replace("\\", "/").lower()
+
+    # Next.js App Router and Pages Router entry files
+    nextjs_entry_filenames = {
+        "app/page.tsx", "app/page.jsx", "app/page.js", "app/page.ts",
+        "pages/index.tsx", "pages/index.jsx", "pages/index.js",
+        "pages/_app.tsx", "pages/_app.jsx", "pages/_app.js",
+    }
+    react_entry_filenames = {
+        "src/app.tsx", "src/app.jsx", "src/app.js",
+        "src/index.tsx", "src/index.jsx", "src/index.js",
+        "src/main.tsx", "src/main.jsx",
+    }
+
+    if any(norm_path == p or norm_path.endswith("/" + p) for p in nextjs_entry_filenames):
+        facts.append(
+            DerivedFact(
+                kind="ui_app",
+                name="nextjs_page",
+                file_path=file_path,
+                line_start=1,
+                line_end=1,
+                details={"framework": "nextjs", "entry_file": file_path},
+            )
+        )
+    elif any(norm_path == p or norm_path.endswith("/" + p) for p in react_entry_filenames):
+        facts.append(
+            DerivedFact(
+                kind="ui_app",
+                name="react_app",
+                file_path=file_path,
+                line_start=1,
+                line_end=1,
+                details={"framework": "react", "entry_file": file_path},
+            )
+        )
+
+    # In-code imports for Streamlit and Gradio
+    if content:
+        ui_patterns = [
+            ("streamlit", re.compile(r"\b(import\s+streamlit\b|from\s+streamlit\b)")),
+            ("gradio", re.compile(r"\b(import\s+gradio\b|from\s+gradio\b)")),
+        ]
+        for line_idx, raw_line in enumerate(content.splitlines(), start=1):
+            if _is_comment_line(raw_line):
+                continue
+            code_line = _strip_inline_comment(raw_line)
+            for name, pattern in ui_patterns:
+                if pattern.search(code_line):
+                    facts.append(
+                        DerivedFact(
+                            kind="ui_app",
+                            name=name,
+                            file_path=file_path,
+                            line_start=line_idx,
+                            line_end=line_idx,
+                            details={"framework": name, "matched_line": raw_line.strip()},
+                        )
+                    )
+
+    return facts
 
     return facts
 
@@ -396,12 +545,12 @@ def derive_file_facts(file_path: str, content: str | None) -> list[DerivedFact]:
     """
     facts: list[DerivedFact] = []
 
-    # File path only detectors
-    facts.extend(detect_tests(file_path))
-
     # Path + optional content detectors
-    facts.extend(detect_ml_usage(file_path, content))
+    facts.extend(detect_tests(file_path))
     facts.extend(detect_entry_points(file_path, content))
+    facts.extend(detect_ui_apps(file_path, content))
+    facts.extend(detect_ml_usage(file_path, content))
+    facts.extend(detect_llm_providers(file_path, content))
 
     # Content-based detectors
     if content:

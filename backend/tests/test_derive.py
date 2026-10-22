@@ -8,6 +8,8 @@ from app.ingestion.derive import (
     detect_js_ts_routes_and_components,
     detect_database_usage,
     detect_ml_usage,
+    detect_llm_providers,
+    detect_ui_apps,
     detect_entry_points,
     detect_env_vars,
     detect_tests,
@@ -189,6 +191,24 @@ def test_database_usage_prisma_detected() -> None:
     assert any(f.name == "prisma" for f in facts)
 
 
+def test_database_usage_supabase_detected() -> None:
+    code = "from supabase import create_client\nclient = create_client('url', 'key')\n"
+    facts = detect_database_usage("db/supabase.py", code)
+    assert len(facts) >= 1
+    assert any(f.name == "supabase" and f.kind == "database" for f in facts)
+    assert facts[0].line_start == 1
+
+
+def test_database_usage_psycopg_and_asyncpg_detected() -> None:
+    code = "import psycopg2\nimport asyncpg\nimport psycopg\n"
+    facts = detect_database_usage("db/postgres.py", code)
+    names = {f.name for f in facts}
+    assert "psycopg2" in names
+    assert "asyncpg" in names
+    assert "psycopg" in names
+    assert all(f.kind == "database" for f in facts)
+
+
 # ---------------------------------------------------------------------------
 # 4. ML imports and model files
 # ---------------------------------------------------------------------------
@@ -196,6 +216,12 @@ def test_ml_torch_import_detected() -> None:
     code = "import torch\nimport torch.nn as nn\n"
     facts = detect_ml_usage("model/train.py", code)
     assert any(f.name == "torch" for f in facts)
+
+
+def test_ml_sentence_transformers_detected() -> None:
+    code = "from sentence_transformers import SentenceTransformer\n"
+    facts = detect_ml_usage("embed.py", code)
+    assert any(f.name == "sentence_transformers" and f.kind == "ml" for f in facts)
 
 
 def test_ml_sklearn_detected() -> None:
@@ -214,6 +240,69 @@ def test_ml_model_file_detected() -> None:
 def test_ml_onnx_file_detected() -> None:
     facts = detect_ml_usage("deploy/model.onnx", None)
     assert len(facts) == 1
+
+
+# ---------------------------------------------------------------------------
+# 4b. LLM Provider tests
+# ---------------------------------------------------------------------------
+def test_llm_provider_detection() -> None:
+    code = '''\
+import openai
+from anthropic import Anthropic
+from google import genai
+from groq import Groq
+import cohere
+from mistralai import Mistral
+import ollama
+'''
+    facts = detect_llm_providers("llm/providers.py", code)
+    names = {f.name for f in facts}
+    assert "openai" in names
+    assert "anthropic" in names
+    assert "google_genai" in names
+    assert "groq" in names
+    assert "cohere" in names
+    assert "mistralai" in names
+    assert "ollama" in names
+    assert all(f.kind == "llm_provider" for f in facts)
+    assert all(f.line_start >= 1 for f in facts)
+
+
+def test_llm_provider_comment_negative() -> None:
+    # Comments mentioning 'groq' must NOT match
+    code = '''\
+# groq is an ultra-fast LLM inference engine
+# from groq import Groq
+x = 100  # groq token limit
+'''
+    facts = detect_llm_providers("notes.py", code)
+    assert facts == []
+
+
+# ---------------------------------------------------------------------------
+# 4c. UI App tests
+# ---------------------------------------------------------------------------
+def test_ui_app_streamlit_and_gradio() -> None:
+    code = "import streamlit as st\nimport gradio as gr\n"
+    facts = detect_ui_apps("app.py", code)
+    names = {f.name for f in facts}
+    assert "streamlit" in names
+    assert "gradio" in names
+    assert all(f.kind == "ui_app" for f in facts)
+
+
+def test_ui_app_nextjs_and_react_entry() -> None:
+    # Next.js App Router entry
+    next_facts = detect_ui_apps("app/page.tsx", None)
+    assert len(next_facts) == 1
+    assert next_facts[0].kind == "ui_app"
+    assert next_facts[0].name == "nextjs_page"
+
+    # React App entry
+    react_facts = detect_ui_apps("src/App.tsx", None)
+    assert len(react_facts) == 1
+    assert react_facts[0].kind == "ui_app"
+    assert react_facts[0].name == "react_app"
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +418,8 @@ def test_non_test_file_not_detected() -> None:
 def test_derive_file_facts_aggregate() -> None:
     code = '''\
 import os
+import streamlit as st
+import openai
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi import FastAPI
 
@@ -350,6 +441,8 @@ if __name__ == "__main__":
     assert "database" in kinds
     assert "env_var" in kinds
     assert "entry_point" in kinds
+    assert "ui_app" in kinds
+    assert "llm_provider" in kinds
 
 
 @pytest.fixture

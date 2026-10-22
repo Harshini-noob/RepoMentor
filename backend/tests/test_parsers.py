@@ -159,7 +159,7 @@ def test_dockerfile_valid_multistage() -> None:
 
     assert deps[1].name == "python"
     assert deps[1].version_spec == "3.11-slim"
-    assert deps[1].kind == "runtime"
+    assert deps[1].kind == "base_image"
     assert deps[1].ecosystem == "docker"
 
 

@@ -59,8 +59,8 @@ def parse(content: str, source_file: str = "Dockerfile") -> list[Dependency]:
             else:
                 name, version_spec = image_ref, None
 
-            # Intermediate stages are build dependencies (dev); the final stage is runtime
-            kind = "runtime" if i == total_stages - 1 else "dev"
+            # Intermediate stages are build dependencies (dev); the final stage is marked base_image
+            kind = "base_image" if i == total_stages - 1 else "dev"
 
             deps.append(
                 Dependency(

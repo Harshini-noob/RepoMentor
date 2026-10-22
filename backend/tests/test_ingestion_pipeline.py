@@ -169,3 +169,53 @@ async def test_ingest_project_failure_sets_failed_status(mock_db) -> None:
     assert proj is not None
     assert proj["status"] == "failed"
     assert "GitHub repository not found or 404" in proj["error"]
+
+
+@pytest.mark.asyncio
+async def test_facts_failure_does_not_fail_ingestion(mock_db, monkeypatch) -> None:
+    await init_indexes(mock_db)
+
+    client = AsyncMock()
+    client.get_repo.return_value = RepoInfo(
+        name="Hello-World",
+        full_name="octocat/Hello-World",
+        owner="octocat",
+        default_branch="main",
+    )
+    client.get_tree.return_value = [
+        TreeItem(path="README.md", mode="100644", type="blob", sha="sha_readme", size=500),
+    ]
+    client.get_file.return_value = FileContent(
+        path="README.md",
+        sha="sha_readme",
+        size=500,
+        decoded_text="hello world",
+    )
+    client.list_commits.return_value = []
+    client.list_pulls.return_value = []
+    client.list_issues.return_value = []
+
+    # Monkeypatch analyze_facts to raise an error containing a secret token
+    from app.ingestion import pipeline as pipeline_module
+
+    async def failing_analyze_facts(*args, **kwargs):
+        raise RuntimeError("Analysis failed due to bad token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890")
+
+    monkeypatch.setattr(pipeline_module, "analyze_facts", failing_analyze_facts)
+
+    project_id = "proj_facts_fail_safe"
+    res = await ingest_project(project_id, "octocat/Hello-World", client=client, db=mock_db)
+
+    # Ingestion must succeed with status=ready
+    assert res["status"] == "ready"
+    assert res["error"] is None
+
+    # Check database: status is ready, facts_status is failed, error is redacted
+    proj = await mock_db.projects.find_one({"_id": project_id}) or await mock_db.projects.find_one({"repo_full_name": "octocat/Hello-World"})
+    assert proj is not None
+    assert proj["status"] == "ready"
+    assert proj["facts_status"] == "failed"
+    assert proj["facts_error"] is not None
+    # Secret token must be redacted
+    assert "ghp_" not in proj["facts_error"]
+    assert "[REDACTED_GITHUB_TOKEN]" in proj["facts_error"]

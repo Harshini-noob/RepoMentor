@@ -14,7 +14,9 @@ from app.core.repositories import (
     upsert_project,
 )
 from app.github.client import GitHubClient
+from app.core.utils import redact
 from app.ingestion.analyze import analyze_facts
+from bson import ObjectId
 
 logger = logging.getLogger("repomentor.ingestion")
 logging.basicConfig(level=logging.INFO)
@@ -335,21 +337,38 @@ async def ingest_project(
         )
         logger.info("[%s] Successfully ingested %s (status=ready)", project_id, repo_full_name)
 
-        # Phase 2 analysis — failures must NOT flip status back to failed
+        # Phase 2 analysis — failures must NOT mark ingestion failed
         try:
             await analyze_facts(
                 project_id,
-                repo_full_name=repo_full_name,
                 db=db,
                 ingest_cap=ingest_cap,
+                repo_full_name=repo_full_name,
             )
         except Exception as analysis_exc:
-            # Log but swallow — ingestion is still considered complete
+            clean_err = redact(str(analysis_exc))
             logger.exception(
-                "[%s] analyze_facts raised unexpectedly: %s", project_id, analysis_exc
+                "[%s] analyze_facts raised unexpectedly: %s", project_id, clean_err
             )
+            # Ensure facts_status is recorded as failed on the project document
+            query = {"_id": ObjectId(project_id)} if ObjectId.is_valid(project_id) else {"_id": project_id}
+            res = await db.projects.update_one(
+                query,
+                {"$set": {"facts_status": "failed", "facts_error": clean_err}},
+            )
+            if res.matched_count == 0 and repo_full_name:
+                await db.projects.update_one(
+                    {"repo_full_name": repo_full_name},
+                    {"$set": {"facts_status": "failed", "facts_error": clean_err}},
+                )
 
-        return final_doc
+        # Refresh project doc so returned document includes facts_status and facts_error
+        query = {"_id": ObjectId(project_id)} if ObjectId.is_valid(project_id) else {"_id": project_id}
+        refreshed_doc = await db.projects.find_one(query)
+        if not refreshed_doc and repo_full_name:
+            refreshed_doc = await db.projects.find_one({"repo_full_name": repo_full_name})
+
+        return refreshed_doc or final_doc
 
     except Exception as exc:
         logger.exception("[%s] Ingestion failed for %s: %s", project_id, repo_full_name, exc)

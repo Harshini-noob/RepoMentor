@@ -123,7 +123,7 @@ async def test_build_dependencies(mock_db) -> None:
     by_name = {d["name"]: (d["ecosystem"], d["kind"], d["source_file"]) for d in docs}
     assert by_name["express"] == ("npm", "runtime", "frontend/package.json")
     assert by_name["jest"] == ("npm", "dev", "frontend/package.json")
-    assert by_name["python"] == ("docker", "runtime", "Dockerfile")
+    assert by_name["python"] == ("docker", "base_image", "Dockerfile")
 
     # Second execution must be strictly idempotent
     second_run = await build_dependencies(project_id, db=mock_db)

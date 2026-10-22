@@ -24,6 +24,7 @@ class ProjectDetailResponse(BaseModel):
     default_branch: str | None = None
     status: str
     facts_status: str | None = None
+    facts_error: str | None = None
     ingest_cap: int | None = None
     head_sha: str | None = None
     analysed_at: str | None = None
@@ -36,6 +37,7 @@ class ProjectSummary(BaseModel):
     repo_full_name: str
     status: str
     facts_status: str | None = None
+    facts_error: str | None = None
     default_branch: str | None = None
     analysed_at: str | None = None
     error: str | None = None
