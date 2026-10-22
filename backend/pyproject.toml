@@ -1,0 +1,25 @@
+[project]
+name = "repomentor-backend"
+version = "0.1.0"
+description = "RepoMentor backend service"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "motor>=3.6.0",
+    "httpx>=0.28.0",
+    "pydantic-settings>=2.7.0",
+    "pyyaml>=6.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "respx>=0.22.0",
+    "mongomock-motor>=0.0.30",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
