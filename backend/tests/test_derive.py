@@ -445,10 +445,52 @@ if __name__ == "__main__":
     assert "llm_provider" in kinds
 
 
+def test_manifest_produces_no_llm_fact() -> None:
+    assert derive_file_facts("pyproject.toml", 'dependencies = ["google-genai>=1.0"]') == []
+
+
+def test_test_file_is_flagged() -> None:
+    facts = derive_file_facts("test_call.py", "import groq\n")
+    llm = [f for f in facts if f.kind == "llm_provider"]
+    assert len(llm) == 1 and llm[0].in_test is True
+
+
+def test_normal_file_not_flagged() -> None:
+    facts = derive_file_facts("providers/groq_provider.py", "import groq\n")
+    llm = [f for f in facts if f.kind == "llm_provider"]
+    assert llm[0].in_test is False
+
+
+def test_model_weights_still_detected_without_content() -> None:
+    facts = derive_file_facts("models/best.pt", None)
+    assert any(f.kind == "ml" for f in facts)
+
+
 @pytest.fixture
 def mock_db():
     client = AsyncMongoMockClient()
     return client["test_derive_facts_db"]
+
+
+@pytest.mark.asyncio
+async def test_derive_project_facts_persists_in_test(mock_db) -> None:
+    await init_indexes(mock_db)
+    project_id = "proj_facts_test_flag"
+    await mock_db.files.insert_one({
+        "project_id": project_id,
+        "path": "tests/test_provider.py",
+        "content": "import groq\n",
+    })
+
+    facts = await derive_project_facts(project_id, db=mock_db)
+
+    llm = next(f for f in facts if f["kind"] == "llm_provider")
+    assert llm["in_test"] is True
+    stored = await mock_db.derived_facts.find_one({
+        "project_id": project_id,
+        "kind": "llm_provider",
+    })
+    assert stored is not None and stored["in_test"] is True
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,22 @@ class DerivedFact(BaseModel):
     line_start: int
     line_end: int
     details: dict[str, Any] = Field(default_factory=dict)
+    in_test: bool = False
+
+
+SOURCE_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs"}
+
+
+def is_test_path(file_path: str) -> bool:
+    """True for files inside tests/ folders or with test-style names."""
+    parts = file_path.replace("\\", "/").lower().split("/")
+    name = parts[-1]
+    return (
+        bool(set(parts[:-1]) & {"tests", "test", "__tests__"})
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+        or name.endswith((".test.js", ".test.ts", ".test.jsx", ".test.tsx", ".spec.js", ".spec.ts"))
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -418,8 +434,6 @@ def detect_ui_apps(file_path: str, content: str | None) -> list[DerivedFact]:
 
     return facts
 
-    return facts
-
 
 # ---------------------------------------------------------------------------
 # 5. Entry Points Detector
@@ -540,25 +554,26 @@ def detect_tests(file_path: str) -> list[DerivedFact]:
 # Aggregator & Orchestrator
 # ---------------------------------------------------------------------------
 def derive_file_facts(file_path: str, content: str | None) -> list[DerivedFact]:
-    """
-    Execute all detectors on a single file and return aggregated derived facts.
-    """
+    """Run all detectors on one file. Code detectors only see source files."""
+    ext = os.path.splitext(file_path.lower())[1]
+    code = content if ext in SOURCE_EXTENSIONS else None
+    in_test = is_test_path(file_path)
+
     facts: list[DerivedFact] = []
-
-    # Path + optional content detectors
     facts.extend(detect_tests(file_path))
-    facts.extend(detect_entry_points(file_path, content))
-    facts.extend(detect_ui_apps(file_path, content))
-    facts.extend(detect_ml_usage(file_path, content))
-    facts.extend(detect_llm_providers(file_path, content))
+    facts.extend(detect_entry_points(file_path, code))
+    facts.extend(detect_ui_apps(file_path, code))
+    facts.extend(detect_ml_usage(file_path, code))
+    facts.extend(detect_llm_providers(file_path, code))
 
-    # Content-based detectors
-    if content:
-        facts.extend(detect_python_routes(file_path, content))
-        facts.extend(detect_js_ts_routes_and_components(file_path, content))
-        facts.extend(detect_database_usage(file_path, content))
-        facts.extend(detect_env_vars(file_path, content))
+    if code:
+        facts.extend(detect_python_routes(file_path, code))
+        facts.extend(detect_js_ts_routes_and_components(file_path, code))
+        facts.extend(detect_database_usage(file_path, code))
+        facts.extend(detect_env_vars(file_path, code))
 
+    for fact in facts:
+        fact.in_test = in_test
     return facts
 
 
@@ -594,6 +609,7 @@ async def derive_project_facts(
                 "line_start": fact.line_start,
                 "line_end": fact.line_end,
                 "details": fact.details,
+                "in_test": fact.in_test,
                 "run_id": run_id,
             }
             saved = await upsert_derived_fact(db, fact_data)
