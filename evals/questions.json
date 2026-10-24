@@ -1,0 +1,74 @@
+[
+  {
+    "id": "q1_overview",
+    "question": "What is the primary purpose of the llm-cost-copilot project and what main technologies or frameworks does it use?",
+    "expected_tools": ["get_overview"],
+    "expected_evidence": "file:pyproject.toml#L1-50"
+  },
+  {
+    "id": "q2_gemini_provider",
+    "question": "How is the Google Gemini LLM provider implemented and which model or client does it call?",
+    "expected_tools": ["search_code", "read_file"],
+    "expected_evidence": "file:providers/gemini_provider.py#L1-50"
+  },
+  {
+    "id": "q3_groq_provider",
+    "question": "How is the Groq provider initialized and what models does it support?",
+    "expected_tools": ["search_code", "read_file"],
+    "expected_evidence": "file:providers/groq_provider.py#L1-50"
+  },
+  {
+    "id": "q4_supabase_db",
+    "question": "What database client does the repository use for persistence and where is it initialized?",
+    "expected_tools": ["get_facts", "read_file"],
+    "expected_evidence": "file:auth.py#L1-30"
+  },
+  {
+    "id": "q5_embedding_classifier",
+    "question": "What model does the embedding-based prompt classifier use to categorize queries?",
+    "expected_tools": ["search_code", "read_file"],
+    "expected_evidence": "file:embedding_classifier.py#L1-40"
+  },
+  {
+    "id": "q6_routing_policy",
+    "question": "How does the routing policy determine whether to route a request to a cheap vs powerful LLM?",
+    "expected_tools": ["search_code", "read_file"],
+    "expected_evidence": "file:routing_policy.py#L1-60"
+  },
+  {
+    "id": "q7_api_routes",
+    "question": "What web framework powers the HTTP API server and what routes or endpoints are exposed?",
+    "expected_tools": ["get_facts", "read_file"],
+    "expected_evidence": "file:main.py#L1-50"
+  },
+  {
+    "id": "q8_streamlit_dashboard",
+    "question": "Does the repository include a UI application or dashboard, and which library powers it?",
+    "expected_tools": ["get_facts", "read_file"],
+    "expected_evidence": "file:dashboard.py#L1-30"
+  },
+  {
+    "id": "q9_env_vars",
+    "question": "What environment variables are required to configure database and API access?",
+    "expected_tools": ["get_facts", "read_file"],
+    "expected_evidence": "file:.env.example#L1-20"
+  },
+  {
+    "id": "q10_docker_base_image",
+    "question": "What base container image and Python version are specified in the Dockerfile?",
+    "expected_tools": ["get_dependencies", "read_file"],
+    "expected_evidence": "file:Dockerfile#L1-15"
+  },
+  {
+    "id": "q11_commit_history",
+    "question": "What was the initial commit in the repository and what did it introduce?",
+    "expected_tools": ["get_timeline", "search_commits"],
+    "expected_evidence": "commit:921f0c7"
+  },
+  {
+    "id": "q12_recent_head_commit",
+    "question": "What changes or files were modified in the head commit ddd1ef6c32bb2516cda40a6d30a714d88c716681?",
+    "expected_tools": ["get_commit", "search_commits"],
+    "expected_evidence": "commit:ddd1ef6"
+  }
+]

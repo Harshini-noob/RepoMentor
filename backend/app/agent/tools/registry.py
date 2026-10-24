@@ -4,8 +4,11 @@ from typing import Any
 from pydantic import ValidationError
 
 from app.agent.tools.base import Tool, ToolOutput
+from app.core.logging import redact
 
 logger = logging.getLogger("repomentor.agent.tools.registry")
+
+MAX_OUTPUT_CHARS = 4000
 
 
 class ToolRegistry:
@@ -98,10 +101,22 @@ class ToolRegistry:
         # 3. Execute tool safely
         try:
             output = await tool.run(project_id, validated_args)
+            if len(output.text) > MAX_OUTPUT_CHARS:
+                excess = len(output.text) - MAX_OUTPUT_CHARS
+                capped_text = f"{output.text[:MAX_OUTPUT_CHARS]}\n[truncated, {excess} more chars]"
+                if hasattr(output, "model_copy"):
+                    output = output.model_copy(update={"text": capped_text, "truncated": True})
+                else:
+                    output = ToolOutput(
+                        text=capped_text,
+                        evidence_ids=getattr(output, "evidence_ids", []),
+                        truncated=True,
+                    )
             return output
         except Exception as exc:
             logger.exception("Error executing tool '%s': %s", name, exc)
+            clean_err = redact(str(exc))[:300]
             return ToolOutput(
-                text=f"ERROR: Tool '{name}' failed during execution: {exc}",
+                text=f"ERROR: Tool '{name}' failed during execution: {clean_err}",
                 truncated=False,
             )

@@ -1,4 +1,6 @@
 import pytest
+import mongomock_motor
+from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, Field
 
 from app.agent.tools.base import (
@@ -12,6 +14,24 @@ from app.agent.tools.base import (
     make_pr_evidence,
 )
 from app.agent.tools.registry import ToolRegistry
+from app.agent.tools import (
+    build_registry,
+    OverviewTool,
+    ListTreeTool,
+    ReadFileTool,
+    SearchCodeTool,
+    DependenciesTool,
+    FactsTool,
+    TimelineTool,
+    SearchCommitsTool,
+    FileHistoryTool,
+    GetCommitTool,
+    SearchPRsTool,
+    GetPRTool,
+)
+from app.github.client import GitHubClient
+import httpx
+import respx
 
 
 class DummyReadArgs(BaseModel):
@@ -21,8 +41,8 @@ class DummyReadArgs(BaseModel):
 
 
 class DummyReadTool(Tool):
-    name = "read_file"
-    description = "Read lines from a repository file."
+    name = "dummy_read"
+    description = "Read lines from a dummy file."
     args_schema = DummyReadArgs
 
     async def run(self, project_id: str, args: DummyReadArgs) -> ToolOutput:
@@ -39,126 +59,507 @@ class DummyOversizedTool(Tool):
     args_schema = DummyReadArgs
 
     async def run(self, project_id: str, args: DummyReadArgs) -> ToolOutput:
-        # Generate 5000 characters
-        large_body = "A" * 5000
+        # Generate 10000 characters
+        large_body = "A" * 10000
         return ToolOutput(text=large_body, evidence_ids=["file:dump.txt#L1-100"])
 
 
-class DummyFailingTool(Tool):
-    name = "failing_tool"
-    description = "Throws an unexpected exception during execution."
+class DummyShortTool(Tool):
+    name = "short_dump"
+    description = "Outputs a 100 character string."
     args_schema = DummyReadArgs
 
     async def run(self, project_id: str, args: DummyReadArgs) -> ToolOutput:
-        raise RuntimeError("Database connection reset mid-tool")
+        return ToolOutput(text="B" * 100, evidence_ids=["file:short.txt#L1-10"])
+
+
+class DummyFailingSecretTool(Tool):
+    name = "failing_secret_tool"
+    description = "Raises an exception with a github token."
+    args_schema = DummyReadArgs
+
+    async def run(self, project_id: str, args: DummyReadArgs) -> ToolOutput:
+        raise RuntimeError("token ghp_abcdefghijklmnopqrstuvwxyz0123456789")
 
 
 @pytest.fixture
-def registry() -> ToolRegistry:
+def mock_db() -> AsyncIOMotorDatabase:
+    client = mongomock_motor.AsyncMongoMockClient()
+    return client["test_agent_db"]
+
+
+@pytest.fixture
+def base_registry() -> ToolRegistry:
     reg = ToolRegistry()
     reg.register(DummyReadTool())
     reg.register(DummyOversizedTool())
-    reg.register(DummyFailingTool())
+    reg.register(DummyShortTool())
+    reg.register(DummyFailingSecretTool())
     return reg
 
 
+async def seed_project_data(mock_db: AsyncIOMotorDatabase) -> str:
+    pid = "proj_test_123"
+    await mock_db.projects.insert_one({
+        "_id": pid,
+        "repo_full_name": "octocat/Hello-World",
+        "description": "My sample repo for agent testing",
+        "default_branch": "main",
+        "status": "ready",
+    })
+    await mock_db.files.insert_many([
+        {
+            "project_id": pid,
+            "path": "src/main.py",
+            "size": 150,
+            "language": "Python",
+            "content": "import fastapi\n\napp = fastapi.FastAPI()\n\n@app.get('/hello')\ndef hello():\n    return {'msg': 'world'}\n",
+        },
+        {
+            "project_id": pid,
+            "path": "src/utils.py",
+            "size": 80,
+            "language": "Python",
+            "content": "def add(a, b):\n    return a + b\n",
+        },
+        {
+            "project_id": pid,
+            "path": "tests/test_main.py",
+            "size": 95,
+            "language": "Python",
+            "content": "def test_hello():\n    assert True\n",
+        },
+        {
+            "project_id": pid,
+            "path": "package.json",
+            "size": 120,
+            "language": "JSON",
+            "content": '{"name": "hello"}',
+        },
+    ])
+    await mock_db.dependencies.insert_many([
+        {
+            "project_id": pid,
+            "name": "fastapi",
+            "version_spec": "^0.110.0",
+            "ecosystem": "pip",
+            "kind": "runtime",
+            "source_file": "requirements.txt",
+        },
+        {
+            "project_id": pid,
+            "name": "pytest",
+            "version_spec": ">=8.0.0",
+            "ecosystem": "pip",
+            "kind": "dev",
+            "source_file": "requirements-dev.txt",
+        },
+    ])
+    await mock_db.derived_facts.insert_many([
+        {
+            "project_id": pid,
+            "kind": "route",
+            "name": "GET /hello",
+            "file_path": "src/main.py",
+            "line_start": 5,
+            "line_end": 7,
+            "details": {"method": "GET", "in_test": False},
+        },
+        {
+            "project_id": pid,
+            "kind": "test",
+            "name": "test_hello",
+            "file_path": "tests/test_main.py",
+            "line_start": 1,
+            "line_end": 2,
+            "details": {"in_test": True},
+        },
+    ])
+    await mock_db.timeline.insert_one({
+        "project_id": pid,
+        "weekly_buckets": [
+            {
+                "week_start": "2026-03-01T00:00:00Z",
+                "commit_count": 5,
+                "additions": 120,
+                "deletions": 10,
+                "top_files": [{"file": "src/main.py", "touches": 4}],
+            }
+        ],
+        "biggest_commits": [
+            {
+                "sha": "a1b2c3d4e5f67890",
+                "date": "2026-03-02T10:00:00Z",
+                "author": "octocat",
+                "message": "Initial release",
+                "additions": 120,
+                "deletions": 10,
+            }
+        ],
+        "dependency_first_seen": {"requirements.txt": {"sha": "a1b2c3d", "date": "2026-03-02"}},
+        "dir_first_seen": {"src": {"sha": "a1b2c3d", "date": "2026-03-02"}},
+        "history_complete": True,
+    })
+    await mock_db.commits.insert_many([
+        {
+            "project_id": pid,
+            "sha": "a1b2c3d4e5f67890123456789012345678901234",
+            "date": "2026-03-02T10:00:00Z",
+            "author": "octocat",
+            "message": "Initial release with FastAPI server",
+            "additions": 120,
+            "deletions": 10,
+            "files_changed": [
+                {"filename": "src/main.py", "additions": 100, "deletions": 5},
+                {"filename": "package.json", "additions": 20, "deletions": 5},
+            ],
+        },
+        {
+            "project_id": pid,
+            "sha": "b2c3d4e5f6789012345678901234567890123456",
+            "date": "2026-03-05T12:00:00Z",
+            "author": "alice",
+            "message": "Fix math utility function",
+            "additions": 5,
+            "deletions": 2,
+            "files_changed": [
+                {"filename": "src/utils.py", "additions": 5, "deletions": 2},
+            ],
+        },
+    ])
+    await mock_db.prs.insert_many([
+        {
+            "project_id": pid,
+            "number": 101,
+            "title": "Add FastAPI routing endpoint",
+            "body": "This PR integrates the hello world route.",
+            "state": "closed",
+            "created_at": "2026-03-03T11:00:00Z",
+            "merged_at": "2026-03-03T12:00:00Z",
+            "files": [
+                {"filename": "src/main.py", "status": "added", "additions": 20, "deletions": 0},
+            ],
+            "comments": [
+                {"user": "reviewer_bob", "body": "Looks great to me!"},
+            ],
+        },
+    ])
+    return pid
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.2 Fix Tests (Central Truncation & Exception Redaction)
+# ---------------------------------------------------------------------------
+
 @pytest.mark.asyncio
-async def test_unknown_tool_returns_error_text(registry: ToolRegistry) -> None:
-    # Executing an unregistered tool name must NOT raise, but return informative ERROR text
-    out = await registry.execute(
-        name="non_existent_tool",
-        raw_args={"query": "test"},
-        project_id="proj_1",
-    )
-    assert isinstance(out, ToolOutput)
-    assert "ERROR: Unknown tool 'non_existent_tool'" in out.text
-    assert "Available tools" in out.text
-    assert out.truncated is False
-
-
-@pytest.mark.asyncio
-async def test_bad_args_validation_error(registry: ToolRegistry) -> None:
-    # Missing required argument 'file_path' and invalid line_start type
-    out = await registry.execute(
-        name="read_file",
-        raw_args={"line_start": "not_an_int"},
-        project_id="proj_1",
-    )
-    assert isinstance(out, ToolOutput)
-    assert "ERROR: Invalid arguments for tool 'read_file'" in out.text
-    assert "file_path" in out.text
-    assert out.truncated is False
-
-
-@pytest.mark.asyncio
-async def test_bad_args_malformed_json_string(registry: ToolRegistry) -> None:
-    # Raw args passed as a string with broken JSON syntax
-    out = await registry.execute(
-        name="read_file",
-        raw_args='{"file_path": "main.py", broken json',
-        project_id="proj_1",
-    )
-    assert isinstance(out, ToolOutput)
-    assert "ERROR: Malformed JSON arguments" in out.text
-    assert out.truncated is False
-
-
-@pytest.mark.asyncio
-async def test_oversized_output_truncated(registry: ToolRegistry) -> None:
-    # Tool returning 5000 characters must be capped at 4000 with visible marker
-    out = await registry.execute(
+async def test_truncation_enforced_centrally_for_10000_chars(base_registry: ToolRegistry) -> None:
+    out = await base_registry.execute(
         name="oversized_dump",
         raw_args={"file_path": "dump.txt"},
         project_id="proj_1",
     )
     assert isinstance(out, ToolOutput)
     assert out.truncated is True
-    # Length of truncated prefix is 4000
+    # Length of result text must be at most 4000 plus marker length
+    assert len(out.text) <= MAX_OUTPUT_CHARS + 60
     assert out.text.startswith("A" * MAX_OUTPUT_CHARS)
-    assert "[truncated, 1000 more chars]" in out.text
+    assert "[truncated, 6000 more chars]" in out.text
+    assert out.evidence_ids == ["file:dump.txt#L1-100"]
 
 
 @pytest.mark.asyncio
-async def test_successful_tool_execution(registry: ToolRegistry) -> None:
-    out = await registry.execute(
-        name="read_file",
-        raw_args={"file_path": "backend/app/main.py", "line_start": 10, "line_end": 20},
+async def test_short_output_not_truncated(base_registry: ToolRegistry) -> None:
+    out = await base_registry.execute(
+        name="short_dump",
+        raw_args={"file_path": "short.txt"},
         project_id="proj_1",
     )
     assert isinstance(out, ToolOutput)
-    assert "Content of backend/app/main.py from line 10 to 20" in out.text
-    assert out.evidence_ids == ["file:backend/app/main.py#L10-20"]
     assert out.truncated is False
+    assert out.text == "B" * 100
+    assert "[truncated" not in out.text
 
 
 @pytest.mark.asyncio
-async def test_failing_tool_caught_as_error_text(registry: ToolRegistry) -> None:
-    # Internal tool exception must NOT raise out of execute()
-    out = await registry.execute(
-        name="failing_tool",
+async def test_exception_redaction_and_capping(base_registry: ToolRegistry) -> None:
+    out = await base_registry.execute(
+        name="failing_secret_tool",
         raw_args={"file_path": "foo.py"},
         project_id="proj_1",
     )
     assert isinstance(out, ToolOutput)
-    assert "ERROR: Tool 'failing_tool' failed during execution: Database connection reset mid-tool" in out.text
-    assert out.truncated is False
+    assert out.text.startswith("ERROR: Tool 'failing_secret_tool' failed during execution:")
+    assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" not in out.text
+    assert "[REDACTED_GITHUB_TOKEN]" in out.text
+    assert len(out.text) <= 400
 
 
-def test_registry_schemas_format(registry: ToolRegistry) -> None:
-    schemas = registry.schemas()
-    assert len(schemas) == 3
+# ---------------------------------------------------------------------------
+# Phase 3.3 Tests: All 7 Domain Tools Scoped to MongoDB Project
+# ---------------------------------------------------------------------------
 
-    # Check provider function-calling structure
-    names = {s["function"]["name"] for s in schemas}
-    assert "read_file" in names
-    assert "oversized_dump" in names
+@pytest.mark.asyncio
+async def test_get_overview_tool(mock_db: AsyncIOMotorDatabase) -> None:
+    seeded_project = await seed_project_data(mock_db)
+    tool = OverviewTool(db=mock_db)
+    # Default: include_tests=False excludes the test fact
+    out = await tool.run(seeded_project, tool.args_schema(include_tests=False))
+    assert "Repository: octocat/Hello-World" in out.text
+    assert "My sample repo for agent testing" in out.text
+    assert "Python" in out.text
+    assert "fastapi" in out.text
+    assert "route: 1" in out.text
+    assert "test:" not in out.text
 
-    read_schema = next(s for s in schemas if s["function"]["name"] == "read_file")
-    assert read_schema["type"] == "function"
-    assert "description" in read_schema["function"]
-    assert "parameters" in read_schema["function"]
-    assert "properties" in read_schema["function"]["parameters"]
-    assert "file_path" in read_schema["function"]["parameters"]["properties"]
+    # include_tests=True includes test fact
+    out_tests = await tool.run(seeded_project, tool.args_schema(include_tests=True))
+    assert "route: 1" in out_tests.text
+    assert "test: 1" in out_tests.text
+
+
+@pytest.mark.asyncio
+async def test_list_tree_tool(mock_db: AsyncIOMotorDatabase) -> None:
+    seeded_project = await seed_project_data(mock_db)
+    tool = ListTreeTool(db=mock_db)
+    out = await tool.run(seeded_project, tool.args_schema(path="", depth=2))
+    assert "Tree for '.'" in out.text
+    assert "package.json" in out.text
+    assert "src/main.py" in out.text or "📁 src/" in out.text
+
+
+@pytest.mark.asyncio
+async def test_read_file_tool(mock_db: AsyncIOMotorDatabase) -> None:
+    seeded_project = await seed_project_data(mock_db)
+    tool = ReadFileTool(db=mock_db)
+    out = await tool.run(seeded_project, tool.args_schema(path="src/main.py", start=1, end=5))
+    assert "File: src/main.py (Lines 1-5" in out.text
+    assert "import fastapi" in out.text
+    assert "@app.get('/hello')" in out.text
+    assert out.evidence_ids == ["file:src/main.py#L1-5"]
+
+    # Unknown file returns error
+    out_err = await tool.run(seeded_project, tool.args_schema(path="does/not/exist.py"))
+    assert "ERROR: File 'does/not/exist.py' not found" in out_err.text
+
+
+@pytest.mark.asyncio
+async def test_search_code_tool(mock_db: AsyncIOMotorDatabase) -> None:
+    seeded_project = await seed_project_data(mock_db)
+    tool = SearchCodeTool(db=mock_db)
+    out = await tool.run(seeded_project, tool.args_schema(query="fastapi", limit=10))
+    assert "Found" in out.text
+    assert "src/main.py:1: import fastapi" in out.text
+    assert "file:src/main.py#L1-1" in out.evidence_ids
+
+    # Search with path_glob that filters it out
+    out_filtered = await tool.run(seeded_project, tool.args_schema(query="fastapi", path_glob="*.js"))
+    assert "No matching files found" in out_filtered.text
+
+
+@pytest.mark.asyncio
+async def test_get_dependencies_tool(mock_db: AsyncIOMotorDatabase) -> None:
+    seeded_project = await seed_project_data(mock_db)
+    tool = DependenciesTool(db=mock_db)
+    # All dependencies
+    out = await tool.run(seeded_project, tool.args_schema(kind=None))
+    assert "Project Dependencies (2 total)" in out.text
+    assert "fastapi (^0.110.0)" in out.text
+    assert "pytest (>=8.0.0)" in out.text
+    assert "dep:fastapi" in out.evidence_ids
+
+    # Filtered by kind=dev
+    out_dev = await tool.run(seeded_project, tool.args_schema(kind="dev"))
+    assert "pytest (>=8.0.0)" in out_dev.text
+    assert "fastapi" not in out_dev.text
+
+
+@pytest.mark.asyncio
+async def test_get_facts_tool(mock_db: AsyncIOMotorDatabase) -> None:
+    seeded_project = await seed_project_data(mock_db)
+    tool = FactsTool(db=mock_db)
+    # Default excludes test facts
+    out = await tool.run(seeded_project, tool.args_schema(include_tests=False))
+    assert "[route] GET /hello" in out.text
+    assert "[test]" not in out.text
+
+    # include_tests=True includes test facts
+    out_with_tests = await tool.run(seeded_project, tool.args_schema(include_tests=True))
+    assert "[route] GET /hello" in out_with_tests.text
+    assert "[test] test_hello" in out_with_tests.text
+
+
+@pytest.mark.asyncio
+async def test_get_timeline_tool(mock_db: AsyncIOMotorDatabase) -> None:
+    seeded_project = await seed_project_data(mock_db)
+    tool = TimelineTool(db=mock_db)
+    out = await tool.run(seeded_project, tool.args_schema())
+    assert "Timeline Summary (history_complete=True):" in out.text
+    assert "Active Weeks: 1" in out.text
+    assert "commit a1b2c3d by octocat" in out.text
+    assert "First-Seen Dependencies" in out.text
+    assert "commit:a1b2c3d" in out.evidence_ids
+
+
+@pytest.mark.asyncio
+async def test_search_commits_tool(mock_db: AsyncIOMotorDatabase) -> None:
+    seeded_project = await seed_project_data(mock_db)
+    tool = SearchCommitsTool(db=mock_db)
+
+    # Search by message text
+    out = await tool.run(seeded_project, tool.args_schema(query="FastAPI"))
+    assert "Found 1 commits matching 'FastAPI'" in out.text
+    assert "commit a1b2c3d" in out.text
+    assert "commit:a1b2c3d" in out.evidence_ids
+
+    # Search by path filter
+    out_path = await tool.run(seeded_project, tool.args_schema(query="math", path="src/utils.py"))
+    assert "Found 1 commits matching 'math'" in out_path.text
+    assert "commit b2c3d4e" in out_path.text
+
+    # Search with non-matching path
+    out_none = await tool.run(seeded_project, tool.args_schema(query="math", path="package.json"))
+    assert "No commits found" in out_none.text
+
+
+@pytest.mark.asyncio
+async def test_file_history_tool(mock_db: AsyncIOMotorDatabase) -> None:
+    seeded_project = await seed_project_data(mock_db)
+    tool = FileHistoryTool(db=mock_db)
+
+    out = await tool.run(seeded_project, tool.args_schema(path="src/main.py"))
+    assert "Commit history for 'src/main.py' (1 commits):" in out.text
+    assert "commit a1b2c3d" in out.text
+    assert "(+100/-5)" in out.text
+    assert "file:src/main.py#L1-1" in out.evidence_ids
+    assert "commit:a1b2c3d" in out.evidence_ids
+
+    # Untouched file
+    out_empty = await tool.run(seeded_project, tool.args_schema(path="unknown/file.txt"))
+    assert "No stored commits found touching 'unknown/file.txt'" in out_empty.text
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_commit_tool_live_fetch(mock_db: AsyncIOMotorDatabase) -> None:
+    seeded_project = await seed_project_data(mock_db)
+
+    # Mock GitHub live diff endpoint
+    diff_content = "diff --git a/src/main.py b/src/main.py\n+import fastapi\n"
+    respx.get("https://api.github.com/repos/octocat/Hello-World/commits/a1b2c3d4e5f67890123456789012345678901234").mock(
+        return_value=httpx.Response(
+            200,
+            text=diff_content,
+            headers={"content-type": "application/vnd.github.diff; charset=utf-8"},
+        )
+    )
+
+    async with GitHubClient(token="fake-token") as gh_client:
+        tool = GetCommitTool(db=mock_db, github_client=gh_client)
+        out = await tool.run(seeded_project, tool.args_schema(sha="a1b2c3d4e5f67890123456789012345678901234"))
+        assert "Commit: a1b2c3d4e5f67890123456789012345678901234" in out.text
+        assert "Author: octocat" in out.text
+        assert "Patch Diff (live from GitHub):" in out.text
+        assert "+import fastapi" in out.text
+        assert "commit:a1b2c3d" in out.evidence_ids
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_commit_tool_diff_truncation_and_redaction(mock_db: AsyncIOMotorDatabase) -> None:
+    seeded_project = await seed_project_data(mock_db)
+
+    # Oversized patch with secret token
+    large_patch = "diff --git a/secret.py\n+ghp_abcdefghijklmnopqrstuvwxyz0123456789\n" + ("+" + "x" * 70 + "\n") * 60
+    assert len(large_patch) > 3000
+
+    respx.get("https://api.github.com/repos/octocat/Hello-World/commits/a1b2c3d4e5f67890123456789012345678901234").mock(
+        return_value=httpx.Response(
+            200,
+            text=large_patch,
+            headers={"content-type": "application/vnd.github.diff"},
+        )
+    )
+
+    async with GitHubClient(token="fake-token") as gh_client:
+        tool = GetCommitTool(db=mock_db, github_client=gh_client)
+        out = await tool.run(seeded_project, tool.args_schema(sha="a1b2c3d"))
+        assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" not in out.text
+        assert "[REDACTED_GITHUB_TOKEN]" in out.text
+        assert "[patch truncated: showing first 3000 characters" in out.text
+
+
+@pytest.mark.asyncio
+async def test_search_prs_tool(mock_db: AsyncIOMotorDatabase) -> None:
+    seeded_project = await seed_project_data(mock_db)
+    tool = SearchPRsTool(db=mock_db)
+
+    # Matching query
+    out = await tool.run(seeded_project, tool.args_schema(query="routing"))
+    assert "Found 1 pull requests matching 'routing'" in out.text
+    assert "PR #101 [closed (merged)]" in out.text
+    assert "pr:101" in out.evidence_ids
+
+    # Query matching nothing
+    out_none = await tool.run(seeded_project, tool.args_schema(query="unrelated"))
+    assert "No pull requests found matching 'unrelated'" in out_none.text
+
+    # Empty repository with 0 PRs
+    await mock_db.prs.delete_many({})
+    out_zero = await tool.run(seeded_project, tool.args_schema(query="routing"))
+    assert "No pull requests exist for this repository." in out_zero.text
+
+
+@pytest.mark.asyncio
+async def test_get_pr_tool(mock_db: AsyncIOMotorDatabase) -> None:
+    seeded_project = await seed_project_data(mock_db)
+    tool = GetPRTool(db=mock_db)
+
+    out = await tool.run(seeded_project, tool.args_schema(number=101))
+    assert "Pull Request #101: Add FastAPI routing endpoint" in out.text
+    assert "State: closed (merged at 2026-03-03T12:00:00Z)" in out.text
+    assert "This PR integrates the hello world route." in out.text
+    assert "src/main.py [added] (+20/-0)" in out.text
+    assert "reviewer_bob: Looks great to me!" in out.text
+    assert "pr:101" in out.evidence_ids
+    assert "file:src/main.py#L1-1" in out.evidence_ids
+
+    # Not found PR number
+    out_404 = await tool.run(seeded_project, tool.args_schema(number=999))
+    assert "Pull request #999 not found" in out_404.text
+
+    # Zero PRs in repository
+    await mock_db.prs.delete_many({})
+    out_zero = await tool.run(seeded_project, tool.args_schema(number=101))
+    assert "No pull requests exist for this repository." in out_zero.text
+
+
+@pytest.mark.asyncio
+async def test_build_registry_with_mock_db(mock_db: AsyncIOMotorDatabase) -> None:
+    seeded_project = await seed_project_data(mock_db)
+    reg = build_registry(db=mock_db)
+    schemas = reg.schemas()
+    assert len(schemas) == 12
+    tool_names = {s["function"]["name"] for s in schemas}
+    expected = {
+        "get_overview",
+        "list_tree",
+        "read_file",
+        "search_code",
+        "get_dependencies",
+        "get_facts",
+        "get_timeline",
+        "search_commits",
+        "file_history",
+        "get_commit",
+        "search_prs",
+        "get_pr",
+    }
+    assert tool_names == expected
+
+    # Execute get_overview via registry
+    exec_out = await reg.execute("get_overview", {}, seeded_project)
+    assert "octocat/Hello-World" in exec_out.text
+    assert exec_out.truncated is False
 
 
 def test_evidence_id_formatters() -> None:

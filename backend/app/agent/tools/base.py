@@ -10,23 +10,6 @@ class ToolOutput(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
     truncated: bool = False
 
-    @model_validator(mode="before")
-    @classmethod
-    def enforce_output_cap(cls, data: Any) -> Any:
-        """Truncate text to MAX_OUTPUT_CHARS with visible indicator."""
-        if isinstance(data, dict):
-            text = str(data.get("text", ""))
-            if len(text) > MAX_OUTPUT_CHARS:
-                excess = len(text) - MAX_OUTPUT_CHARS
-                data["text"] = f"{text[:MAX_OUTPUT_CHARS]}\n... [truncated, {excess} more chars]"
-                data["truncated"] = True
-        elif hasattr(data, "text"):
-            text = str(data.text)
-            if len(text) > MAX_OUTPUT_CHARS:
-                excess = len(text) - MAX_OUTPUT_CHARS
-                data.text = f"{text[:MAX_OUTPUT_CHARS]}\n... [truncated, {excess} more chars]"
-                data.truncated = True
-        return data
 
 
 class Tool(ABC):

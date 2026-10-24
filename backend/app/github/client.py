@@ -99,16 +99,18 @@ class GitHubClient:
         method: str,
         url: str,
         params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> tuple[Any, httpx.Headers]:
         """
         Execute an HTTP request with ETag caching and rate limit handling.
         Returns a tuple of (data, response_headers).
         """
-        # Resolve full URL string to use as cache key
-        built_req = self._client.build_request(method, url, params=params)
-        cache_key = str(built_req.url)
+        # Resolve full URL string to use as cache key (include Accept header if custom)
+        built_req = self._client.build_request(method, url, params=params, headers=headers)
+        accept_header = (headers or {}).get("Accept", "")
+        cache_key = f"{built_req.url}::{accept_header}"
 
-        req_headers: dict[str, str] = {}
+        req_headers: dict[str, str] = dict(headers or {})
         cached_entry = self._cache.get(cache_key)
         if cached_entry:
             req_headers["If-None-Match"] = cached_entry[0]
@@ -135,7 +137,13 @@ class GitHubClient:
                     f"GitHub API error {response.status_code} for {url}: {response.text}"
                 )
 
-            data = response.json()
+            # Handle diff/patch text format vs JSON
+            content_type = response.headers.get("content-type", "")
+            if "application/vnd.github.diff" in accept_header or "text/" in content_type:
+                data = response.text
+            else:
+                data = response.json()
+
             etag = response.headers.get("ETag")
             if etag:
                 self._cache[cache_key] = (etag, data)
@@ -270,6 +278,15 @@ class GitHubClient:
             date=author_data.get("date"),
             raw=data,
         )
+
+    async def get_commit_patch(self, owner: str, repo: str, sha: str) -> str:
+        """Fetch unified diff / patch for a commit live from GitHub."""
+        data, _ = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/commits/{sha}",
+            headers={"Accept": "application/vnd.github.diff"},
+        )
+        return str(data)
 
     async def list_pulls(
         self,
