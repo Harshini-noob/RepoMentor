@@ -5,6 +5,7 @@ Scoped to project_id.
 
 import re
 from typing import Any
+from typing import Literal
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, Field
 
@@ -15,6 +16,7 @@ from app.core.db import get_db
 class SearchCommitsArgs(BaseModel):
     query: str
     path: str | None = None
+    order: Literal["newest", "oldest"] = "newest"
     limit: int = Field(
         default=10,
         ge=1,
@@ -24,7 +26,7 @@ class SearchCommitsArgs(BaseModel):
 
 class SearchCommitsTool(Tool):
     name = "search_commits"
-    description = "Search commits by message text, file path, or commit hash prefix."
+    description = "Search commits by message, path, or hash prefix; choose newest or oldest ordering."
     args_schema = SearchCommitsArgs
 
     def __init__(self, db: AsyncIOMotorDatabase | None = None) -> None:
@@ -58,7 +60,8 @@ class SearchCommitsTool(Tool):
             clean_path = args.path.strip()
             filter_query["files_changed.filename"] = {"$regex": re.escape(clean_path), "$options": "i"}
 
-        cursor = db.commits.find(filter_query).sort("date", -1).limit(args.limit)
+        sort_direction = 1 if args.order == "oldest" else -1
+        cursor = db.commits.find(filter_query).sort("date", sort_direction).limit(args.limit)
         commits = []
         evidence_ids = []
 

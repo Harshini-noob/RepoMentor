@@ -86,6 +86,72 @@ async def test_malformed_citation_is_added_to_unverified_note(
 
 
 @pytest.mark.asyncio
+async def test_unverified_answer_is_repaired_once_and_replaced(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    project_id = await seed_project_data(mock_db)
+    call_count = 0
+
+    async def fake_chat(messages, tools=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return LLMReply(
+                content="Reading the source.",
+                tool_calls=[
+                    ToolCall(
+                        id="repair-source",
+                        name="read_file",
+                        arguments={"path": "src/main.py", "start": 1, "end": 1},
+                    )
+                ],
+            )
+        if call_count == 2:
+            return LLMReply(
+                content='[Fact] The source says "a fabricated statement here".',
+                tool_calls=[],
+            )
+        assert tools is None
+        assert any(
+            message.get("role") == "user"
+            and "These strings do not appear in any tool result:" in message.get("content", "")
+            for message in messages
+        )
+        return LLMReply(content="[Fact] The source prints hello.", tool_calls=[])
+
+    run = await run_agent(
+        goal="What does the source print?",
+        project_id=project_id,
+        max_steps=4,
+        db=mock_db,
+        chat_fn=fake_chat,
+    )
+
+    assert call_count == 3
+    assert run.final_answer == "[Fact] The source prints hello."
+    assert [step.tool for step in run.steps].count("policy_repair") == 1
+
+
+@pytest.mark.asyncio
+async def test_verified_answer_does_not_trigger_repair(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    async def fake_chat(messages, tools=None):
+        return LLMReply(content="[Fact] This is a Python project.", tool_calls=[])
+
+    run = await run_agent(
+        goal="Summarize the project.",
+        project_id="proj_verified_answer",
+        max_steps=3,
+        db=mock_db,
+        chat_fn=fake_chat,
+    )
+
+    assert run.final_answer == "[Fact] This is a Python project."
+    assert "policy_repair" not in [step.tool for step in run.steps]
+
+
+@pytest.mark.asyncio
 async def test_untagged_answer_is_nudged_then_tagged_answer_is_accepted(
     mock_db: AsyncIOMotorDatabase,
 ) -> None:
@@ -169,6 +235,44 @@ async def test_second_untagged_answer_is_accepted_with_note(
     assert run.final_answer == "Untagged answer 2.\n\n[No claim tags were produced]"
     assert call_count == 2
     assert [step.tool for step in run.steps] == ["policy_nudge"]
+
+
+@pytest.mark.asyncio
+async def test_policy_nudge_does_not_consume_step_budget(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    project_id = await seed_project_data(mock_db)
+    call_count = 0
+
+    async def fake_chat(messages, tools=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return LLMReply(content="Untagged draft.", tool_calls=[])
+        if call_count == 2:
+            return LLMReply(
+                content="Checking source.",
+                tool_calls=[
+                    ToolCall(
+                        id="read-after-nudge",
+                        name="read_file",
+                        arguments={"path": "src/main.py", "start": 1, "end": 1},
+                    )
+                ],
+            )
+        return LLMReply(content="[Fact] Source checked.", tool_calls=[])
+
+    run = await run_agent(
+        goal="Summarize the source.",
+        project_id=project_id,
+        max_steps=2,
+        db=mock_db,
+        chat_fn=fake_chat,
+    )
+
+    assert call_count == 3
+    assert run.stop_reason == "answered"
+    assert [step.tool for step in run.steps] == ["policy_nudge", "read_file"]
 
 
 # (b) Calls two tools then answers
@@ -420,6 +524,9 @@ async def test_unverified_quote_note_uses_tool_results(
     quote_note = run.final_answer.split("[Quotes not found in any tool result: ", 1)[1]
     assert quote_note.count('"fabricated setting value') == 5
     assert quote_note.endswith("(+1 more)]")
+    note = run.final_answer.split("[Quotes not found in any tool result: ", 1)[1]
+    for item in note.rstrip("]").split(", "):
+        assert len(item.strip('"')) <= 80
 
 
 # (d) Never stops -> hits max_steps, triggers 70% wrap-up warning and final synthesis call
@@ -501,7 +608,7 @@ async def test_agent_recovers_from_single_parse_error(mock_db: AsyncIOMotorDatab
         else:
             # Provide final answer
             return LLMReply(
-                content="Final Answer: [Fact] Found src/main.py [file:src/main.py#L1].",
+                content="Final Answer: [Fact] Found src/main.py.",
                 tool_calls=[],
                 usage={"input_tokens": 120, "output_tokens": 25},
             )

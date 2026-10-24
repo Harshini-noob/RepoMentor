@@ -13,6 +13,23 @@ from app.agent.tools.base import Tool, ToolOutput, make_file_evidence
 from app.core.db import get_db
 
 
+def matches_glob(path: str, pattern: str | None) -> bool:
+    """Match repository paths using convenient recursive and basename globs."""
+    normalized_path = path.replace("\\", "/")
+    normalized_pattern = (pattern or "").replace("\\", "/").strip()
+    if normalized_pattern in {"", "*", "**", "**/*"}:
+        return True
+    if fnmatch.fnmatch(normalized_path, normalized_pattern):
+        return True
+    if normalized_pattern.startswith("**/") and fnmatch.fnmatch(
+        normalized_path, normalized_pattern[3:]
+    ):
+        return True
+    return "/" not in normalized_pattern and fnmatch.fnmatch(
+        normalized_path.rsplit("/", 1)[-1], normalized_pattern
+    )
+
+
 class SearchCodeArgs(BaseModel):
     query: str
     path_glob: str | None = None
@@ -40,65 +57,56 @@ class SearchCodeTool(Tool):
         if not raw_query:
             return ToolOutput(text="ERROR: Search query cannot be empty.", evidence_ids=[])
 
-        # 1. Attempt MongoDB text search index
-        results: list[dict[str, Any]] = []
-        try:
-            filter_query: dict[str, Any] = {
-                "project_id": project_id,
-                "$text": {"$search": raw_query, "$caseSensitive": False},
-            }
-            cursor = (
-                db.files.find(
-                    filter_query,
-                    {"path": 1, "content": 1, "score": {"$meta": "textScore"}},
-                )
-                .sort([("score", {"$meta": "textScore"})])
-                .limit(args.limit * 3)
-            )
-            async for doc in cursor:
-                if doc.get("content"):
-                    results.append(doc)
-        except Exception:
-            # mongomock or MongoDB deployment without text index
-            results = []
+        all_files: list[dict[str, Any]] = []
+        cursor = db.files.find(
+            {"project_id": project_id},
+            {"path": 1, "content": 1},
+        ).sort("path", 1)
+        async for doc in cursor:
+            path = doc.get("path")
+            if isinstance(path, str) and matches_glob(path, args.path_glob):
+                all_files.append(doc)
 
-        # 2. Regex fallback if text search returned nothing
-        if not results:
-            escaped = re.escape(raw_query)
-            regex_filter: dict[str, Any] = {
-                "project_id": project_id,
-                "content": {"$regex": escaped, "$options": "i"},
-            }
-            cursor = db.files.find(regex_filter, {"path": 1, "content": 1}).limit(args.limit * 3)
-            async for doc in cursor:
-                if doc.get("content"):
-                    results.append(doc)
-
-        # 3. Apply path_glob filter if specified
-        if args.path_glob:
-            glob_pat = args.path_glob.strip()
-            results = [doc for doc in results if fnmatch.fnmatch(doc["path"], glob_pat)]
-
-        if not results:
+        display_glob = args.path_glob.replace("\\", "/").strip() if args.path_glob else "none"
+        scope_line = f"Searched {len(all_files)} files (path_glob: {display_glob or 'none'})"
+        if args.path_glob and not all_files:
             return ToolOutput(
-                text=f"No matching files found for query '{raw_query}'.",
+                text=(
+                    f"{scope_line}\nERROR: path_glob '{args.path_glob}' matched no files. "
+                    "Retry without path_glob."
+                ),
                 evidence_ids=[],
             )
 
-        # 4. Extract line numbers and short snippets for matches
-        pattern = re.compile(re.escape(raw_query), re.IGNORECASE)
+        full_pattern = re.compile(re.escape(raw_query), re.IGNORECASE)
+        word_patterns = [
+            (word, re.compile(re.escape(word), re.IGNORECASE))
+            for word in dict.fromkeys(re.findall(r"\w+", raw_query))
+            if word.casefold() != raw_query.casefold()
+        ]
         snippets = []
         evidence_ids = []
 
-        for doc in results:
+        for doc in all_files:
             path = doc["path"]
             content = doc.get("content") or ""
             lines = content.splitlines()
 
             for idx, line in enumerate(lines, start=1):
-                if pattern.search(line):
+                match = full_pattern.search(line)
+                matched_word = None
+                if match is None:
+                    matched_word = next(
+                        (
+                            word for word, pattern in word_patterns
+                            if pattern.search(line)
+                        ),
+                        None,
+                    )
+                if match or matched_word:
                     short_line = line.strip()[:160]
-                    snippets.append(f"{path}:{idx}: {short_line}")
+                    word_note = f" (matched on word: {matched_word})" if matched_word else ""
+                    snippets.append(f"{path}:{idx}: {short_line}{word_note}")
                     evidence_ids.append(make_file_evidence(path, idx, idx))
                     if len(snippets) >= args.limit:
                         break
@@ -107,11 +115,14 @@ class SearchCodeTool(Tool):
 
         if not snippets:
             return ToolOutput(
-                text=f"Query '{raw_query}' appeared in documents but no matching lines were extracted.",
+                text=f"{scope_line}\nSearched {len(all_files)} files, no matches for '{raw_query}'.",
                 evidence_ids=[],
             )
 
-        output_text = f"Found {len(snippets)} matches for '{raw_query}':\n" + "\n".join(snippets)
+        output_text = (
+            f"{scope_line}\nFound {len(snippets)} matches for '{raw_query}':\n"
+            + "\n".join(snippets)
+        )
         return ToolOutput(
             text=output_text,
             evidence_ids=evidence_ids,

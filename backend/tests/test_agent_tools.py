@@ -28,6 +28,7 @@ from app.agent.tools import (
     SearchPRsTool,
     GetPRTool,
 )
+from app.agent.tools.search_code import matches_glob
 from app.github.client import GitHubClient
 import httpx
 import respx
@@ -396,12 +397,49 @@ async def test_search_code_tool(mock_db: AsyncIOMotorDatabase) -> None:
     tool = SearchCodeTool(db=mock_db)
     out = await tool.run(seeded_project, tool.args_schema(query="fastapi", limit=10))
     assert "Found" in out.text
+    assert out.text.startswith("Searched 4 files (path_glob: none)\n")
     assert "src/main.py:1: import fastapi" in out.text
     assert "file:src/main.py#L1-1" in out.evidence_ids
 
-    # Search with path_glob that filters it out
+    out_empty = await tool.run(
+        seeded_project,
+        tool.args_schema(query="not_present", path_glob="*.py"),
+    )
+    assert "Searched 3 files, no matches for 'not_present'." in out_empty.text
+
     out_filtered = await tool.run(seeded_project, tool.args_schema(query="fastapi", path_glob="*.js"))
-    assert "No matching files found" in out_filtered.text
+    assert (
+        "ERROR: path_glob '*.js' matched no files. Retry without path_glob."
+        in out_filtered.text
+    )
+
+
+def test_matches_glob_supports_recursive_and_basename_patterns() -> None:
+    assert matches_glob("auth.py", "**/*.py")
+    assert matches_glob("providers/x.py", "**/*.py")
+    assert not matches_glob("a.js", "**/*.py")
+    assert matches_glob(r"providers\\groq_provider.py", "**/*.py")
+    assert matches_glob("providers/groq_provider.py", "*.py")
+
+
+@pytest.mark.asyncio
+async def test_search_code_falls_back_to_individual_words(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    project_id = await seed_project_data(mock_db)
+    await mock_db.files.insert_one({
+        "project_id": project_id,
+        "path": "src/logger.py",
+        "content": "telemetry events are recorded here\n",
+        "size": 30,
+    })
+
+    result = await SearchCodeTool(db=mock_db).run(
+        project_id,
+        SearchCodeTool.args_schema(query="telemetry logger"),
+    )
+
+    assert "src/logger.py:1: telemetry events are recorded here (matched on word: telemetry)" in result.text
 
 
 @pytest.mark.asyncio
@@ -489,6 +527,12 @@ async def test_search_commits_tool(mock_db: AsyncIOMotorDatabase) -> None:
     # Search with non-matching path
     out_none = await tool.run(seeded_project, tool.args_schema(query="math", path="package.json"))
     assert "No commits found" in out_none.text
+
+    out_oldest = await tool.run(
+        seeded_project,
+        tool.args_schema(query="src/", order="oldest"),
+    )
+    assert out_oldest.text.index("a1b2c3d") < out_oldest.text.index("b2c3d4e")
 
 
 def test_tool_descriptions_are_at_most_25_words_and_arguments_are_compact() -> None:

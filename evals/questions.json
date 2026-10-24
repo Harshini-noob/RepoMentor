@@ -1,74 +1,125 @@
 [
   {
-    "id": "q1_overview",
-    "question": "What is the primary purpose of the llm-cost-copilot project and what main technologies or frameworks does it use?",
+    "id": "overview-project",
+    "category": "overview",
+    "question": "Explain this project.",
     "expected_tools": ["get_overview"],
-    "expected_evidence": "file:pyproject.toml#L1-50"
+    "acceptable_tools": ["get_overview", "get_dependencies", "get_facts"],
+    "expected_evidence": ["dep:"],
+    "answer_must_contain_any": ["router", "routing", "llm"]
   },
   {
-    "id": "q2_gemini_provider",
-    "question": "How is the Google Gemini LLM provider implemented and which model or client does it call?",
+    "id": "deps-list",
+    "category": "dependencies",
+    "question": "What dependencies does this project use?",
+    "expected_tools": ["get_dependencies"],
+    "expected_evidence": ["dep:supabase", "dep:groq"],
+    "answer_must_contain_any": ["supabase", "groq"]
+  },
+  {
+    "id": "database-usage",
+    "category": "facts",
+    "question": "Which database does this project use, and in which files?",
+    "expected_tools": ["get_facts"],
+    "acceptable_tools": ["get_facts", "search_code", "get_dependencies"],
+    "expected_evidence": ["fact:database", "file:logger.py", "file:auth.py"],
+    "answer_must_contain_any": ["supabase"]
+  },
+  {
+    "id": "auth-where",
+    "category": "code-location",
+    "question": "Where is authentication implemented?",
     "expected_tools": ["search_code", "read_file"],
-    "expected_evidence": "file:providers/gemini_provider.py#L1-50"
+    "expected_evidence": ["file:auth.py"],
+    "answer_must_contain_any": ["auth.py"]
   },
   {
-    "id": "q3_groq_provider",
-    "question": "How is the Groq provider initialized and what models does it support?",
-    "expected_tools": ["search_code", "read_file"],
-    "expected_evidence": "file:providers/groq_provider.py#L1-50"
+    "id": "api-endpoints",
+    "category": "facts",
+    "question": "What API endpoints does this project expose?",
+    "expected_tools": ["get_facts"],
+    "expected_evidence": ["file:main.py"],
+    "answer_must_contain_any": ["/query"]
   },
   {
-    "id": "q4_supabase_db",
-    "question": "What database client does the repository use for persistence and where is it initialized?",
-    "expected_tools": ["get_facts", "read_file"],
-    "expected_evidence": "file:auth.py#L1-30"
+    "id": "llm-providers",
+    "category": "facts",
+    "question": "Which LLM providers does the project support, and where are they implemented?",
+    "expected_tools": ["get_facts"],
+    "expected_evidence": ["file:providers/gemini_provider.py", "file:providers/groq_provider.py"],
+    "answer_must_contain_any": ["groq", "gemini"]
   },
   {
-    "id": "q5_embedding_classifier",
-    "question": "What model does the embedding-based prompt classifier use to categorize queries?",
-    "expected_tools": ["search_code", "read_file"],
-    "expected_evidence": "file:embedding_classifier.py#L1-40"
+    "id": "embeddings-where",
+    "category": "code-location",
+    "question": "Where are embeddings used in this project?",
+    "expected_tools": ["search_code"],
+    "expected_evidence": ["file:embedding_classifier.py"],
+    "answer_must_contain_any": ["embedding_classifier", "sentence"]
   },
   {
-    "id": "q6_routing_policy",
-    "question": "How does the routing policy determine whether to route a request to a cheap vs powerful LLM?",
-    "expected_tools": ["search_code", "read_file"],
-    "expected_evidence": "file:routing_policy.py#L1-60"
+    "id": "why-supabase",
+    "category": "why",
+    "question": "Why did I use Supabase?",
+    "expected_tools": ["search_commits", "get_commit"],
+    "expected_evidence": ["commit:02a5c7b"],
+    "answer_must_contain_any": ["telemetry"]
   },
   {
-    "id": "q7_api_routes",
-    "question": "What web framework powers the HTTP API server and what routes or endpoints are exposed?",
-    "expected_tools": ["get_facts", "read_file"],
-    "expected_evidence": "file:main.py#L1-50"
+    "id": "commit-what-changed",
+    "category": "history",
+    "question": "What did commit 02a5c7b change?",
+    "expected_tools": ["get_commit"],
+    "expected_evidence": ["commit:02a5c7b"],
+    "answer_must_contain_any": ["supabase"]
   },
   {
-    "id": "q8_streamlit_dashboard",
-    "question": "Does the repository include a UI application or dashboard, and which library powers it?",
-    "expected_tools": ["get_facts", "read_file"],
-    "expected_evidence": "file:dashboard.py#L1-30"
+    "id": "commit-logger-replaced",
+    "category": "history",
+    "question": "What did commit 02a5c7b change in logger.py, and what did the telemetry logger use before Supabase?",
+    "expected_tools": ["get_commit"],
+    "expected_evidence": ["commit:02a5c7b"],
+    "answer_must_contain_any": ["logs.jsonl", "jsonl"]
   },
   {
-    "id": "q9_env_vars",
-    "question": "What environment variables are required to configure database and API access?",
-    "expected_tools": ["get_facts", "read_file"],
-    "expected_evidence": "file:.env.example#L1-20"
+    "id": "routing-metadata-replaced",
+    "category": "history",
+    "question": "In commit 02a5c7b, what replaced the static MODEL_METADATA dictionary in routing_policy.py?",
+    "expected_tools": ["get_commit"],
+    "expected_evidence": ["commit:02a5c7b"],
+    "answer_must_contain_any": ["build_model_metadata"]
   },
   {
-    "id": "q10_docker_base_image",
-    "question": "What base container image and Python version are specified in the Dockerfile?",
-    "expected_tools": ["get_dependencies", "read_file"],
-    "expected_evidence": "file:Dockerfile#L1-15"
+    "id": "supabase-first-added",
+    "category": "history",
+    "question": "When was Supabase first added to this project?",
+    "expected_tools": ["search_commits"],
+    "expected_evidence": ["commit:02a5c7b"],
+    "answer_must_contain_any": ["02a5c7b", "2026-08-01", "august 1"]
   },
   {
-    "id": "q11_commit_history",
-    "question": "What was the initial commit in the repository and what did it introduce?",
-    "expected_tools": ["get_timeline", "search_commits"],
-    "expected_evidence": "commit:921f0c7"
+    "id": "busiest-week",
+    "category": "history",
+    "question": "Which week had the most commits?",
+    "expected_tools": ["get_timeline"],
+    "expected_evidence": ["commit:"],
+    "answer_must_contain_any": ["2026-07-27", "july 27"]
   },
   {
-    "id": "q12_recent_head_commit",
-    "question": "What changes or files were modified in the head commit ddd1ef6c32bb2516cda40a6d30a714d88c716681?",
-    "expected_tools": ["get_commit", "search_commits"],
-    "expected_evidence": "commit:ddd1ef6"
+    "id": "no-pr-caching",
+    "category": "abstention",
+    "question": "Which pull request introduced caching?",
+    "expected_tools": ["search_prs"],
+    "expected_evidence": [],
+    "answer_must_contain_any": ["no pull request", "no pull requests", "none exist", "no commit or pull"],
+    "answer_must_not_match": ["pr:\\d+", "pull request #\\d+", "PR #\\d+"]
+  },
+  {
+    "id": "abstain-revenue",
+    "category": "abstention",
+    "question": "What is this project's monthly revenue?",
+    "expected_tools": [],
+    "expected_evidence": [],
+    "answer_must_contain_any": ["not found", "no evidence", "cannot", "could not", "does not", "uncertain", "no information"]
   }
 ]

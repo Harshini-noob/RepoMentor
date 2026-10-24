@@ -90,6 +90,7 @@ def _is_empty_tool_result(text: str) -> bool:
     return bool(
         re.search(r"\bno\b.*\bfound\b", text, re.IGNORECASE | re.DOTALL)
         or re.search(r"\bno matching lines\b", text, re.IGNORECASE)
+        or re.search(r"\bno matches\b", text, re.IGNORECASE)
     )
 
 
@@ -139,6 +140,9 @@ async def run_agent(
     history_nudge_sent = False
     tag_nudge_sent = False
     stagnation_nudge_sent = False
+    policy_nudge_count = 0
+    repair_done = False
+    repair_pending = False
 
     try:
         step_idx = 0
@@ -162,11 +166,13 @@ async def run_agent(
                 _notify(on_event, f"thinking... (step {step_idx}/{max_steps})")
                 llm_kwargs: dict[str, Any] = {
                     "messages": _trim_old_tool_results(messages),
-                    "tools": schemas,
+                    "tools": None if repair_pending else schemas,
                 }
                 if on_event is not None:
                     llm_kwargs["on_event"] = on_event
                 reply: LLMReply = await llm_chat(**llm_kwargs)
+                if repair_pending:
+                    repair_pending = False
             except LLMOutputParseError as p_exc:
                 parse_error_count += 1
                 elapsed_ms = int((time.perf_counter() - t_start) * 1000)
@@ -210,9 +216,11 @@ async def run_agent(
                     is_why_question(goal)
                     and not history_was_checked
                     and not history_nudge_sent
+                    and policy_nudge_count < 3
                     and step_idx < max_steps
                 ):
                     history_nudge_sent = True
+                    policy_nudge_count += 1
                     messages.append({"role": "assistant", "content": reply.content or ""})
                     messages.append({
                         "role": "user",
@@ -235,13 +243,16 @@ async def run_agent(
                     )
                     steps.append(nudge_step)
                     _notify(on_step, nudge_step)
+                    step_idx -= 1
                     continue
                 if (
                     not tag_nudge_sent
                     and not any(count_tags(reply.content or "").values())
+                    and policy_nudge_count < 3
                     and step_idx < max_steps
                 ):
                     tag_nudge_sent = True
+                    policy_nudge_count += 1
                     messages.append({"role": "assistant", "content": reply.content or ""})
                     messages.append({
                         "role": "user",
@@ -263,8 +274,41 @@ async def run_agent(
                     )
                     steps.append(nudge_step)
                     _notify(on_step, nudge_step)
+                    step_idx -= 1
                     continue
-                final_answer = reply.content or ""
+                answer = reply.content or ""
+                collected = {eid for step in steps for eid in step.evidence_ids}
+                unsupported = find_unsupported_citations(answer, collected)
+                unverified_quotes = find_unverified_quotes(answer, tool_texts)
+                repair_items = [*unsupported, *unverified_quotes][:5]
+                if repair_items and not repair_done and step_idx < max_steps:
+                    repair_done = True
+                    repair_pending = True
+                    messages.append({"role": "assistant", "content": answer})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "These strings do not appear in any tool result: "
+                            f"{', '.join(repair_items)}. "
+                            "Rewrite your answer removing or correcting them using only tool output. "
+                            "Keep the tags and valid citations. Do not call tools."
+                        ),
+                    })
+                    repair_step = TraceStep(
+                        step=step_idx,
+                        thought_summary=answer[:160] if answer else None,
+                        tool="policy_repair",
+                        args={},
+                        result_preview="Requested removal or correction of unsupported answer content.",
+                        evidence_ids=[],
+                        ms=int((time.perf_counter() - t_start) * 1000),
+                        tokens=call_tokens,
+                    )
+                    steps.append(repair_step)
+                    _notify(on_step, repair_step)
+                    step_idx -= 1
+                    continue
+                final_answer = answer
                 if tag_nudge_sent and not any(count_tags(final_answer).values()):
                     final_answer += "\n\n[No claim tags were produced]"
                 stop_reason = "answered"
@@ -342,9 +386,10 @@ async def run_agent(
                     all(repeated for _, repeated in recent_tool_results)
                     or all(_is_empty_tool_result(text) for text, _ in recent_tool_results)
                 )
-                if stagnant and not stagnation_nudge_sent:
+                if stagnant and not stagnation_nudge_sent and policy_nudge_count < 3:
                     stagnation_triggered = True
             if stagnation_triggered:
+                policy_nudge_count += 1
                 messages.append({"role": "user", "content": STAGNATION_NUDGE})
                 stagnation_nudge_sent = True
                 nudge_step = TraceStep(
@@ -437,7 +482,7 @@ async def run_agent(
         if unverified_quotes:
             shown_quotes = unverified_quotes[:5]
             quote_note = "[Quotes not found in any tool result: " + ", ".join(
-                f'"{quote}"' for quote in shown_quotes
+                f'"{quote[:80]}"' for quote in shown_quotes
             )
             if len(unverified_quotes) > 5:
                 quote_note += f", (+{len(unverified_quotes) - 5} more)"

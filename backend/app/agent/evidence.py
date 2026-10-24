@@ -18,7 +18,9 @@ FILE_RE = re.compile(r"file:(?P<path>[^#]+)#L(?P<s>\d+)(?:-L?(?P<e>\d+))?")
 COMMIT_RE = re.compile(
     r"commit:(?P<sha>[0-9a-fA-F]{7,40})(?::(?P<path>[^\s\]\)#,]+))?"
 )
-QUOTE_RE = re.compile(r"`([^`]+)`|\"((?:\\.|[^\"\\])*)\"")
+FENCED_CODE_RE = re.compile(r"```[^\r\n]*\r?\n(.*?)```", re.DOTALL)
+INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\r\n]+)`(?!`)")
+DOUBLE_QUOTED_RE = re.compile(r'"((?:\\.|[^"\\])*)"')
 
 
 def _normalise_whitespace(text: str) -> str:
@@ -90,23 +92,58 @@ def find_unsupported_citations(answer: str, evidence_ids) -> list[str]:
 
 
 def find_unverified_quotes(answer: str, tool_texts) -> list[str]:
-    """Return quoted spans of at least 12 characters not found in tool output."""
-    normalised_results = [
-        _normalise_whitespace(text)
-        for text in tool_texts
-    ]
+    """Return code lines and quoted spans not found in tool output."""
+    normalised_results = []
+    for text in tool_texts:
+        cleaned_lines = []
+        for line in text.splitlines():
+            if line.startswith(("+", "-", " ")):
+                line = line[1:]
+            cleaned_lines.append(line)
+        normalised_results.append(_normalise_whitespace("\n".join(cleaned_lines)))
+
     unverified: list[str] = []
-    for match in QUOTE_RE.finditer(answer):
-        quote = match.group(1) if match.group(1) is not None else match.group(2)
-        if quote is None:
-            continue
-        quote = quote.replace('\\"', '"').replace("\\\\", "\\")
-        if len(quote) < 12:
-            continue
-        normalised_quote = _normalise_whitespace(quote)
-        if CITE_RE.fullmatch(normalised_quote):
-            continue
-        if not any(normalised_quote in result for result in normalised_results):
-            if normalised_quote not in unverified:
-                unverified.append(normalised_quote)
+    code_failure_count = 0
+
+    def record_if_missing(value: str, minimum_length: int, code_line: bool = False) -> None:
+        nonlocal code_failure_count
+        value = value.replace('\\"', '"').replace("\\\\", "\\")
+        if len(value) < minimum_length:
+            return
+        normalised = _normalise_whitespace(value)
+        if not normalised or CITE_RE.fullmatch(normalised):
+            return
+        if any(normalised in result for result in normalised_results):
+            return
+        if code_line and code_failure_count >= 5:
+            return
+        item = (
+            f"code lines not found in any tool result: {normalised}"
+            if code_line
+            else normalised
+        )
+        if item not in unverified:
+            unverified.append(item)
+            if code_line:
+                code_failure_count += 1
+
+    prose_segments: list[str] = []
+    cursor = 0
+    for match in FENCED_CODE_RE.finditer(answer):
+        prose_segments.append(answer[cursor:match.start()])
+        cursor = match.end()
+        for line in match.group(1).splitlines():
+            if line.strip():
+                record_if_missing(line, 1, code_line=True)
+    prose_segments.append(answer[cursor:])
+
+    for prose in prose_segments:
+        inline_spans = list(INLINE_CODE_RE.finditer(prose))
+        for match in inline_spans:
+            record_if_missing(match.group(1), 12)
+
+        prose_without_inline = INLINE_CODE_RE.sub(" ", prose)
+        for match in DOUBLE_QUOTED_RE.finditer(prose_without_inline):
+            record_if_missing(match.group(1), 20)
+
     return unverified
