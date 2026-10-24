@@ -8,7 +8,7 @@ from app.core.logging import redact
 
 logger = logging.getLogger("repomentor.agent.tools.registry")
 
-MAX_OUTPUT_CHARS = 4000
+MAX_OUTPUT_CHARS = 2000
 
 
 class ToolRegistry:

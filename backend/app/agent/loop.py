@@ -11,9 +11,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from app.agent.evidence import find_unsupported_citations
 
-from app.agent.guards import RepeatedCallGuard, should_warn_wrap_up
-from app.agent.llm import chat as default_chat
+from app.agent.guards import HISTORY_TOOLS, RepeatedCallGuard, is_why_question, should_warn_wrap_up
+from app.agent.llm import LLMOutputParseError, chat as default_chat
 from app.agent.state import AgentRun, LLMReply, ToolCall, TraceStep
 from app.agent.tools import build_registry
 from app.agent.tools.base import ToolOutput
@@ -39,6 +40,32 @@ def load_system_prompt() -> str:
     )
 
 
+def _notify(callback: Callable[..., Any] | None, *args: Any) -> None:
+    if callback is not None:
+        try:
+            callback(*args)
+        except Exception:
+            logger.debug("Progress callback failed", exc_info=True)
+
+
+def _trim_old_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tool_message_indexes = [
+        index for index, message in enumerate(messages) if message.get("role") == "tool"
+    ]
+    keep_indexes = set(tool_message_indexes[-2:])
+    trimmed_messages: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        copied_message = dict(message)
+        if message.get("role") == "tool" and index not in keep_indexes:
+            content = message.get("content") or ""
+            copied_message["content"] = (
+                f"{content[:300]}\n"
+                "[older result trimmed to save tokens; repeat the same call to see it again]"
+            )
+        trimmed_messages.append(copied_message)
+    return trimmed_messages
+
+
 async def run_agent(
     goal: str,
     project_id: str,
@@ -46,6 +73,8 @@ async def run_agent(
     db: AsyncIOMotorDatabase | None = None,
     registry: ToolRegistry | None = None,
     chat_fn: Callable[..., Any] | None = None,
+    on_step: Callable[[TraceStep], None] | None = None,
+    on_event: Callable[[str], None] | None = None,
 ) -> AgentRun:
     """
     Execute autonomous agent investigation loop up to max_steps:
@@ -76,6 +105,11 @@ async def run_agent(
     wrap_up_warned = False
 
     schemas = reg.schemas()
+    parse_error_count = 0
+    tool_result_cache: dict[str, str] = {}
+    history_nudge_sent = False
+    repeated_call_count = 0
+    repeated_call_nudge_sent = False
 
     try:
         step_idx = 0
@@ -94,14 +128,85 @@ async def run_agent(
                 })
                 wrap_up_warned = True
 
-            # Call LLM
-            reply: LLMReply = await llm_chat(messages=messages, tools=schemas)
+            # Call LLM, catching LLMOutputParseError for in-loop recovery
+            try:
+                _notify(on_event, f"thinking... (step {step_idx}/{max_steps})")
+                llm_kwargs: dict[str, Any] = {
+                    "messages": _trim_old_tool_results(messages),
+                    "tools": schemas,
+                }
+                if on_event is not None:
+                    llm_kwargs["on_event"] = on_event
+                reply: LLMReply = await llm_chat(**llm_kwargs)
+            except LLMOutputParseError as p_exc:
+                parse_error_count += 1
+                elapsed_ms = int((time.perf_counter() - t_start) * 1000)
+                # Record a trace step for the parse error
+                steps.append(
+                    TraceStep(
+                        step=step_idx,
+                        thought_summary="LLMOutputParseError encountered",
+                        tool="error",
+                        args={},
+                        result_preview=f"Parse error #{parse_error_count}: {redact(str(p_exc))[:200]}",
+                        evidence_ids=[],
+                        ms=elapsed_ms,
+                        tokens=0,
+                    )
+                )
+                _notify(on_step, steps[-1])
+
+                if parse_error_count < 3 and step_idx < max_steps:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your previous reply was invalid. Either call one of the available tools "
+                            "with valid JSON arguments, or give your final answer now. "
+                            "Do not write your reasoning as plain text."
+                        ),
+                    })
+                    continue
+                else:
+                    # On third occurrence (or if max_steps reached), finalize
+                    stop_reason = "error"
+                    break
 
             call_tokens = (reply.usage.get("input_tokens", 0) + reply.usage.get("output_tokens", 0)) if reply.usage else 0
             total_tokens += call_tokens
 
             # If no tool calls produced, model delivered final answer
             if not reply.tool_calls:
+                history_was_checked = any(step.tool in HISTORY_TOOLS for step in steps)
+                if (
+                    is_why_question(goal)
+                    and not history_was_checked
+                    and not history_nudge_sent
+                    and step_idx < max_steps
+                ):
+                    history_nudge_sent = True
+                    messages.append({"role": "assistant", "content": reply.content or ""})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Before answering a why-question, check the project history: call "
+                            "search_commits (and file_history for the most relevant file) for the key term. "
+                            "Then answer, separating what the code shows from why it was chosen, and tag "
+                            "each part Fact, Inferred or Uncertain."
+                        ),
+                    })
+                    nudge_step = TraceStep(
+                        step=step_idx,
+                        thought_summary=reply.content[:160] if reply.content else None,
+                        tool="policy_nudge",
+                        args={},
+                        result_preview="Requested a project history check before answering the why-question.",
+                        evidence_ids=[],
+                        ms=int((time.perf_counter() - t_start) * 1000),
+                        tokens=call_tokens,
+                    )
+                    steps.append(nudge_step)
+                    _notify(on_step, nudge_step)
+                    continue
                 final_answer = reply.content or ""
                 stop_reason = "answered"
                 break
@@ -129,18 +234,20 @@ async def run_agent(
             for tc in reply.tool_calls:
                 args = tc.arguments if isinstance(tc.arguments, dict) else {}
                 tool_output: ToolOutput
+                call_key = repeated_guard._call_key(tc.name, args)
+                was_repeated = repeated_guard.is_repeated(tc.name, args)
 
-                if repeated_guard.is_repeated(tc.name, args):
+                if was_repeated:
+                    repeated_call_count += 1
+                    cached_text = tool_result_cache[call_key]
                     tool_output = ToolOutput(
-                        text=(
-                            f"ERROR: You already called tool '{tc.name}' with identical arguments {args} "
-                            "in this session. Please analyze the previous result or choose a different query."
-                        ),
+                        text="(repeated call, returning the earlier result)\n" + cached_text[:2000],
                         evidence_ids=[],
                         truncated=False,
                     )
                 else:
                     tool_output = await reg.execute(tc.name, args, project_id)
+                    tool_result_cache[call_key] = tool_output.text
 
                 elapsed_ms = int((time.perf_counter() - t_start) * 1000)
 
@@ -156,6 +263,7 @@ async def run_agent(
                     tokens=call_tokens,
                 )
                 steps.append(step_record)
+                _notify(on_step, step_record)
 
                 # Append tool result message to conversation
                 messages.append({
@@ -164,31 +272,84 @@ async def run_agent(
                     "name": tc.name,
                     "content": tool_output.text,
                 })
+                if was_repeated and repeated_call_count >= 2 and not repeated_call_nudge_sent:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "You are repeating searches. Call a different tool (for example "
+                            "get_commit with a path) or give your final answer now."
+                        ),
+                    })
+                    repeated_call_nudge_sent = True
 
-        # Check if max_steps reached without final answer
-        if step_idx >= max_steps and final_answer is None:
-            stop_reason = "max_steps"
-            # Ask the model once for a final answer from evidence gathered so far
+        # Determine if finalization call is needed (on max_steps, parse error cutoff, or missing answer)
+        if final_answer is None:
+            if stop_reason != "error":
+                stop_reason = "max_steps"
+
             final_prompt_msg = {
                 "role": "user",
                 "content": (
-                    "Budget limit reached. Based on the evidence gathered so far, "
-                    "provide your final answer to the original goal now. "
-                    "Explicitly state what you could and could not determine."
+                    "Based on the evidence gathered so far, provide your final answer to the original goal now. "
+                    "Tag each substantive claim with [Fact] (seen in code/commit), [Inferred] (reasoned from observations), "
+                    "or [Uncertain] (not supported). Explicitly state what you could and could not determine."
                 ),
             }
             messages.append(final_prompt_msg)
-            final_reply: LLMReply = await llm_chat(messages=messages, tools=None)
-            final_tokens = (final_reply.usage.get("input_tokens", 0) + final_reply.usage.get("output_tokens", 0)) if final_reply.usage else 0
-            total_tokens += final_tokens
-            final_answer = final_reply.content or "Could not determine final answer within step budget."
+            try:
+                _notify(on_event, "writing final answer from the evidence so far...")
+                final_llm_kwargs: dict[str, Any] = {
+                    "messages": _trim_old_tool_results(messages),
+                    "tools": None,
+                }
+                if on_event is not None:
+                    final_llm_kwargs["on_event"] = on_event
+                final_reply: LLMReply = await llm_chat(**final_llm_kwargs)
+                final_tokens = (final_reply.usage.get("input_tokens", 0) + final_reply.usage.get("output_tokens", 0)) if final_reply.usage else 0
+                total_tokens += final_tokens
+                final_answer = final_reply.content or None
+            except Exception as fin_exc:
+                logger.warning("Finalization LLM call failed: %s", fin_exc)
+                final_answer = None
+
+            # If finalization call also failed or returned empty content, build deterministic fallback
+            if not final_answer:
+                stop_reason = "error"
+                tools_used = sorted(list({s.tool for s in steps if s.tool and s.tool != "error"}))
+                evidence_collected = sorted(list({eid for s in steps for eid in s.evidence_ids}))
+                tools_str = ", ".join(tools_used) if tools_used else "none"
+                ev_str = ", ".join(evidence_collected) if evidence_collected else "none"
+                final_answer = (
+                    f"Investigation terminated before completion ({stop_reason}). "
+                    f"Tools used: {tools_str}. Evidence IDs gathered: {ev_str}. "
+                    "Could not determine a definitive final answer due to execution errors."
+                )
 
     except Exception as exc:
         logger.exception("Agent run encountered unhandled error: %s", exc)
         stop_reason = "error"
-        if final_answer is None:
-            final_answer = f"Agent execution aborted due to error: {redact(str(exc))}"
-
+        # Deterministic fallback answer listing tools and evidence
+        tools_used = sorted(list({s.tool for s in steps if s.tool and s.tool != "error"}))
+        evidence_collected = sorted(list({eid for s in steps for eid in s.evidence_ids}))
+        tools_str = ", ".join(tools_used) if tools_used else "none"
+        ev_str = ", ".join(evidence_collected) if evidence_collected else "none"
+        final_answer = (
+            f"Investigation terminated before completion (error: {redact(str(exc))[:200]}). "
+            f"Tools used: {tools_str}. Evidence IDs gathered: {ev_str}. "
+            "Could not determine a definitive final answer due to execution errors."
+        )
+    if final_answer:
+        final_answer = final_answer.translate(
+            {ord(char): None for char in "\u200b\u200c\u200d\ufeff"}
+        )
+        collected = {eid for s in steps for eid in s.evidence_ids}
+        unsupported = find_unsupported_citations(final_answer, collected)
+        if unsupported:
+            final_answer += (
+                "\n\n[Unverified citations, not backed by any tool result in this run: "
+                + ", ".join(unsupported)
+                + "]"
+            )
     run_record = AgentRun(
         goal=goal,
         project_id=project_id,

@@ -157,6 +157,7 @@ async def ingest_project(
         project_doc = await upsert_project(
             db,
             {
+                "project_id": project_id,
                 "repo_full_name": repo_full_name,
                 "default_branch": repo_info.default_branch,
                 "status": "ingesting",
@@ -327,6 +328,7 @@ async def ingest_project(
         final_doc = await upsert_project(
             db,
             {
+                "project_id": project_id,
                 "repo_full_name": repo_full_name,
                 "status": "ready",
                 "ingest_cap": ingest_cap,
@@ -375,6 +377,7 @@ async def ingest_project(
         await upsert_project(
             db,
             {
+                "project_id": project_id,
                 "repo_full_name": repo_full_name,
                 "status": "failed",
                 "error": str(exc),

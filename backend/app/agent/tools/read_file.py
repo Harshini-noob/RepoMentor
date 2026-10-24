@@ -13,14 +13,18 @@ from app.core.db import get_db
 class ReadFileArgs(BaseModel):
     path: str = Field(..., description="Path of the file in the repository (e.g. 'src/index.ts').")
     start: int = Field(default=1, ge=1, description="1-based starting line number (default: 1).")
-    end: int = Field(default=200, ge=1, description="1-based ending line number (default: 200).")
+    end: int | None = Field(
+        default=None,
+        ge=1,
+        description="1-based ending line number; reads at most 80 lines per call.",
+    )
 
 
 class ReadFileTool(Tool):
     name = "read_file"
     description = (
         "Read file content line by line with line numbers. "
-        "Allows inspecting implementations, configs, and definitions."
+        "Reads at most 80 lines per call; request a narrow range and call again using the continuation marker."
     )
     args_schema = ReadFileArgs
 
@@ -35,7 +39,8 @@ class ReadFileTool(Tool):
 
         # Sanitize arguments
         start_line = max(1, args.start)
-        end_line = max(start_line, args.end)
+        requested_end = args.end if args.end is not None else start_line + 79
+        requested_end = max(start_line, requested_end)
 
         file_doc = await db.files.find_one({"project_id": project_id, "path": args.path})
         if not file_doc:
@@ -64,12 +69,17 @@ class ReadFileTool(Tool):
                 evidence_ids=[make_file_evidence(args.path, 1, total_lines or 1)],
             )
 
-        actual_end = min(end_line, total_lines)
+        actual_end = min(requested_end, start_line + 79, total_lines)
         sliced_lines = lines[start_line - 1 : actual_end]
 
         formatted = [f"{i:4d} | {line}" for i, line in enumerate(sliced_lines, start=start_line)]
         header = f"File: {args.path} (Lines {start_line}-{actual_end} of {total_lines})"
         output_text = header + "\n" + "\n".join(formatted)
+        if actual_end < total_lines and (args.end is None or requested_end > actual_end):
+            output_text += (
+                f"\n[showing lines {start_line}-{actual_end} of {total_lines}; "
+                f"call again with start={actual_end + 1} for more]"
+            )
 
         evidence = [make_file_evidence(args.path, start_line, actual_end)]
         return ToolOutput(

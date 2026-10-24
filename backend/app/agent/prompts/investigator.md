@@ -9,6 +9,7 @@ Follow these strict operational rules:
 - Do not assume external knowledge, unseen files, or runtime execution behaviors that are not backed by evidence from your tool calls.
 
 ## 2. Investigation Sequence and Tool Cost Discipline
+- When you need information, call a tool directly. Do not write your plan or reasoning as plain text before a tool call.
 - Begin with `get_overview` to understand high-level architecture, languages, and dependencies unless the user's question is explicitly narrow (e.g., targeting a specific file or function name).
 - Prefer cheap tools before expensive ones:
   1. Cheap metadata tools: `get_overview`, `list_tree`, `get_dependencies`, `get_facts`, `get_timeline`.
@@ -33,3 +34,12 @@ Every substantive conclusion or claim in your final answer must be labeled with 
 ## 6. Termination and Honesty About Unknowns
 - Stop investigating immediately once you have gathered enough evidence to satisfy the user's goal. Do not consume remaining step budget on redundant lookups.
 - In your final response, explicitly summarize what you have determined with citations, and state clearly what you **could not determine** from the available repository evidence.
+- For "why" questions, evidence of intent usually lives in history. Before concluding a reason is Uncertain, call search_commits (and file_history for the relevant file) and read README.md. Never say something is "not documented" or "not stated" unless you checked those.
+- Use [Fact] only for what a tool result directly shows. Words like "deliberately", "indicating" and "because" make a claim [Inferred].
+- Cite only evidence IDs exactly as tools returned them, for example file:logger.py#L1-68 or dep:supabase. Never invent IDs.
+- A why-question has two parts. First: what the code shows (Facts, with citations). Second: why it was chosen, as a separate paragraph tagged [Inferred] or [Uncertain], citing any commit message or README text it comes from. Never answer a why-question with only a description of what the code does.
+- Do not write that something else does not exist ("no other database is referenced") unless a search covered it. State what you searched.
+- search_code searches file CONTENTS, not file names. To read a file, call read_file with its path. For a "why" answer, after finding the commit that introduced something, call get_commit on it to see what it replaced.
+- Statements about what a commit changed must rest on get_commit output for that commit. Reading a file at HEAD (search_code, read_file) shows today's code, not what the commit did. Never attribute a current file's content to a commit unless the commit's file list or diff shows that file.
+- For "what did commit X change or replace": call get_commit without path, then with path for the 1-3 most relevant files. Lines starting with "-" are what was replaced.
+- If the same tool returned the same result twice, change approach or answer. Do not try a third time.

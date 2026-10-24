@@ -2,7 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
-from groq import APIStatusError, RateLimitError
+from openai import APIConnectionError, APIStatusError, RateLimitError
 
 from app.agent.llm import chat
 from app.agent.state import (
@@ -31,6 +31,114 @@ def _make_mock_response(
         completion_tokens=completion_tokens,
     )
     return SimpleNamespace(choices=[choice], usage=usage)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "expected_extra_body"),
+    [
+        ("openai/gpt-oss-120b", {"reasoning_effort": "medium"}),
+        ("llama-3.3-70b-versatile", None),
+        ("openai/gpt-oss-120b", {"reasoning_effort": "low"}),
+    ],
+)
+async def test_reasoning_effort_is_only_sent_for_gpt_oss(
+    monkeypatch,
+    model: str,
+    expected_extra_body: dict[str, str] | None,
+) -> None:
+    monkeypatch.setattr(
+        "app.agent.llm.get_settings",
+        lambda: SimpleNamespace(
+            llm_api_key="test-key",
+            llm_base_url="https://example.test/v1",
+            llm_model=model,
+            llm_reasoning_effort=(
+                None if expected_extra_body == {"reasoning_effort": "low"} else "medium"
+            ),
+            groq_api_key="legacy-test-key",
+            groq_model=model,
+            groq_reasoning_effort=None,
+        ),
+    )
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create.return_value = _make_mock_response(content="Done")
+
+    await chat(
+        messages=[{"role": "user", "content": "Hi"}],
+        client=mock_client,
+        model=model,
+    )
+
+    call_kwargs = mock_client.chat.completions.create.call_args.kwargs
+    if expected_extra_body is None:
+        assert "extra_body" not in call_kwargs
+    else:
+        assert call_kwargs["extra_body"] == expected_extra_body
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_falls_back_to_legacy_groq_setting(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.agent.llm.get_settings",
+        lambda: SimpleNamespace(
+            llm_api_key="test-key",
+            llm_base_url=None,
+            llm_model="openai/gpt-oss-120b",
+            llm_reasoning_effort="low",
+            model_fields_set={"groq_reasoning_effort"},
+            groq_api_key="legacy-test-key",
+            groq_model="openai/gpt-oss-120b",
+            groq_reasoning_effort="medium",
+        ),
+    )
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create.return_value = _make_mock_response(content="Done")
+
+    await chat(
+        messages=[{"role": "user", "content": "Hi"}],
+        client=mock_client,
+    )
+
+    assert mock_client.chat.completions.create.call_args.kwargs["extra_body"] == {
+        "reasoning_effort": "medium"
+    }
+
+
+@pytest.mark.asyncio
+async def test_model_resolution_prefers_argument_then_llm_then_groq(monkeypatch) -> None:
+    settings = SimpleNamespace(
+        llm_api_key="test-key",
+        llm_base_url=None,
+        llm_model="llm-model",
+        llm_reasoning_effort="low",
+        groq_api_key="legacy-test-key",
+        groq_model="legacy-model",
+        groq_reasoning_effort="low",
+    )
+    monkeypatch.setattr("app.agent.llm.get_settings", lambda: settings)
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create.return_value = _make_mock_response(content="Done")
+
+    await chat(
+        messages=[{"role": "user", "content": "Hi"}],
+        client=mock_client,
+        model="argument-model",
+    )
+    assert mock_client.chat.completions.create.call_args.kwargs["model"] == "argument-model"
+
+    await chat(
+        messages=[{"role": "user", "content": "Hi"}],
+        client=mock_client,
+    )
+    assert mock_client.chat.completions.create.call_args.kwargs["model"] == "llm-model"
+
+    del settings.llm_model
+    await chat(
+        messages=[{"role": "user", "content": "Hi"}],
+        client=mock_client,
+    )
+    assert mock_client.chat.completions.create.call_args.kwargs["model"] == "legacy-model"
 
 
 @pytest.mark.asyncio
@@ -167,13 +275,84 @@ async def test_chat_rate_limit_persistent_raises() -> None:
     rate_err = RateLimitError("Rate limit reached", response=resp_429, body={"error": "rate_limit"})
 
     mock_client = AsyncMock()
-    # Fails on both attempts
-    mock_client.chat.completions.create.side_effect = [rate_err, rate_err]
+    # Fails on the initial attempt and both allowed retries.
+    mock_client.chat.completions.create.side_effect = [rate_err, rate_err, rate_err]
 
     with pytest.raises(RateLimitError):
         await chat(messages=[{"role": "user", "content": "fail test"}], client=mock_client, backoff=0.01)
 
+    assert mock_client.chat.completions.create.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_chat_retries_twice_on_rate_limit_and_emits_events(monkeypatch) -> None:
+    req = httpx.Request("POST", "https://api.groq.com/chat")
+    resp_429 = httpx.Response(429, request=req)
+    rate_err = RateLimitError("Rate limit reached", response=resp_429, body={"error": "rate_limit"})
+    success_resp = _make_mock_response(content="Recovered after two rate limits")
+
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create.side_effect = [rate_err, rate_err, success_resp]
+    sleep = AsyncMock()
+    monkeypatch.setattr("app.agent.llm.asyncio.sleep", sleep)
+    events: list[str] = []
+
+    reply = await chat(
+        messages=[{"role": "user", "content": "retry test"}],
+        client=mock_client,
+        backoff=0.01,
+        on_event=events.append,
+    )
+
+    assert reply.content == "Recovered after two rate limits"
+    assert mock_client.chat.completions.create.call_count == 3
+    assert len(events) == 2
+    assert all(event.startswith("waiting ") for event in events)
+
+
+@pytest.mark.asyncio
+async def test_chat_gives_up_when_retry_after_exceeds_backoff_budget(monkeypatch) -> None:
+    req = httpx.Request("POST", "https://api.groq.com/chat")
+    resp_429 = httpx.Response(429, request=req, headers={"retry-after": "100"})
+    rate_err = RateLimitError("Rate limit reached", response=resp_429, body={"error": "rate_limit"})
+
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create.side_effect = rate_err
+    sleep = AsyncMock()
+    monkeypatch.setattr("app.agent.llm.asyncio.sleep", sleep)
+    events: list[str] = []
+
+    with pytest.raises(RateLimitError):
+        await chat(
+            messages=[{"role": "user", "content": "retry test"}],
+            client=mock_client,
+            on_event=events.append,
+        )
+
+    assert mock_client.chat.completions.create.call_count == 1
+    sleep.assert_not_awaited()
+    assert events == ["rate limit wait of 100s is too long, giving up"]
+
+
+@pytest.mark.asyncio
+async def test_chat_retries_connection_error(monkeypatch) -> None:
+    req = httpx.Request("POST", "https://api.groq.com/chat")
+    connection_err = APIConnectionError(request=req)
+    success_resp = _make_mock_response(content="Recovered after connection error")
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create.side_effect = [connection_err, success_resp]
+    sleep = AsyncMock()
+    monkeypatch.setattr("app.agent.llm.asyncio.sleep", sleep)
+
+    reply = await chat(
+        messages=[{"role": "user", "content": "connection test"}],
+        client=mock_client,
+        backoff=0.01,
+    )
+
+    assert reply.content == "Recovered after connection error"
     assert mock_client.chat.completions.create.call_count == 2
+    sleep.assert_awaited_once_with(0.01)
 
 
 @pytest.mark.asyncio

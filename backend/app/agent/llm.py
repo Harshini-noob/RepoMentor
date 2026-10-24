@@ -1,42 +1,120 @@
+"""
+LLM provider wrapper — OpenAI-compatible client.
+
+Why a wrapper?
+--------------
+All LLM providers (Gemini via v1beta/openai, Groq, OpenAI, etc.) expose the
+same OpenAI-compatible REST API. Routing through this single wrapper means:
+  * The rest of the codebase never imports a provider SDK directly.
+  * Switching providers requires only changing LLM_API_KEY / LLM_BASE_URL /
+    LLM_MODEL in .env — no code changes.
+  * Retry logic, token accounting, parse-error recovery, and redaction live in
+    one place and are tested once.
+"""
+
 import asyncio
-import inspect
 import json
 import logging
-from typing import Any
+from typing import Any, Callable
 
-from groq import APIStatusError, AsyncGroq, RateLimitError
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    AsyncOpenAI,
+    BadRequestError,
+    RateLimitError,
+)
 
 from app.agent.state import LLMReply, ToolCall
 from app.config import get_settings
+from app.core.logging import redact
 
 logger = logging.getLogger("repomentor.agent.llm")
 
-_client: AsyncGroq | None = None
+REQUEST_TIMEOUT_S = 60.0
+MAX_TOTAL_BACKOFF_S = 45.0
+MAX_TRANSIENT_RETRIES = 2
 
 
-def get_groq_client() -> AsyncGroq:
-    """Retrieve or initialize the AsyncGroq client singleton using config."""
+class LLMOutputParseError(Exception):
+    """Raised when the LLM outputs malformed tool calls or unparseable output after retries."""
+
+    def __init__(self, message: str, failed_generation: str | None = None) -> None:
+        super().__init__(message)
+        self.failed_generation = failed_generation
+
+
+_client: AsyncOpenAI | None = None
+
+
+def get_llm_client() -> AsyncOpenAI:
+    """Retrieve or initialize the AsyncOpenAI-compatible client singleton using config."""
     global _client
     if _client is None:
         settings = get_settings()
-        if not settings.groq_api_key:
-            raise ValueError("GROQ_API_KEY is not configured in settings or backend/.env")
-        _client = AsyncGroq(api_key=settings.groq_api_key)
+        api_key = getattr(settings, "llm_api_key", None) or getattr(
+            settings, "groq_api_key", None
+        )
+        if not api_key:
+            raise ValueError(
+                "No LLM API key configured. Set LLM_API_KEY (or GROQ_API_KEY) in backend/.env"
+            )
+        base_url = getattr(settings, "llm_base_url", None)  # None → uses OpenAI default
+        _client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=REQUEST_TIMEOUT_S,
+            max_retries=0,
+        )
     return _client
 
 
 def _is_retryable_error(exc: Exception) -> bool:
     """Check if an error is a rate-limit (429) or transient 5xx server error."""
+    if isinstance(exc, APIConnectionError):
+        return True
     if isinstance(exc, RateLimitError):
         return True
     if isinstance(exc, APIStatusError):
         status = getattr(exc, "status_code", 0)
         return status == 429 or status >= 500
-    # Also check generic status_code attribute if raised by custom wrappers
     status = getattr(exc, "status_code", None)
     if isinstance(status, int) and (status == 429 or status >= 500):
         return True
     return False
+
+
+def _retry_after_seconds(exc: Exception, default: float) -> float:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        try:
+            return float(headers.get("retry-after", default))
+        except (TypeError, ValueError):
+            pass
+    return default
+
+
+def _extract_parse_failed_generation(exc: BadRequestError) -> tuple[bool, str | None]:
+    """
+    Check if a BadRequestError represents an output_parse_failed or tool_use_failed error.
+    Returns (is_parse_error, failed_generation).
+    """
+    body = getattr(exc, "body", None)
+    err_obj = body.get("error", {}) if isinstance(body, dict) else {}
+    code = err_obj.get("code")
+    err_type = err_obj.get("type")
+    msg = str(err_obj.get("message", "") or str(exc))
+
+    failed_gen = err_obj.get("failed_generation")
+
+    is_parse = (
+        code in ("output_parse_failed", "tool_use_failed")
+        or err_type in ("output_parse_failed", "tool_use_failed")
+        or "output_parse_failed" in msg
+        or "tool_use_failed" in msg
+    )
+    return is_parse, failed_gen
 
 
 async def chat(
@@ -45,48 +123,105 @@ async def chat(
     client: Any = None,
     model: str | None = None,
     backoff: float = 1.0,
+    on_event: Callable[[str], None] | None = None,
 ) -> LLMReply:
     """
-    Execute a chat completion with the Groq API.
+    Execute a chat completion via the OpenAI-compatible API.
 
-    Retries once on 429 (rate-limit) or 5xx server errors with backoff.
+    Retries transient API errors with bounded backoff.
+    Retries up to 2 times on BadRequestError with 'output_parse_failed' or 'tool_use_failed',
+    raising LLMOutputParseError if all retries fail.
     Parses tool-call arguments with json.loads and, if malformed,
     returns the error text in the ToolCall object instead of crashing.
     """
     settings = get_settings()
-    selected_model = model or settings.groq_model
-    groq_client = client or get_groq_client()
+    selected_model = (
+        model
+        or getattr(settings, "llm_model", None)
+        or getattr(settings, "groq_model", None)
+    )
+    llm_client = client or get_llm_client()
+
+    def emit(text: str) -> None:
+        if on_event is not None:
+            try:
+                on_event(text)
+            except Exception:
+                pass
 
     kwargs: dict[str, Any] = {
         "model": selected_model,
         "messages": messages,
     }
+    if selected_model.startswith("openai/gpt-oss"):
+        configured_fields = getattr(settings, "model_fields_set", None)
+        llm_effort = getattr(settings, "llm_reasoning_effort", None)
+        if llm_effort and (
+            configured_fields is None or "llm_reasoning_effort" in configured_fields
+        ):
+            reasoning_effort = llm_effort
+        else:
+            reasoning_effort = (
+                getattr(settings, "groq_reasoning_effort", None)
+                or llm_effort
+                or "low"
+            )
+        kwargs["extra_body"] = {"reasoning_effort": reasoning_effort}
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
 
     response = None
-    for attempt in range(2):
+    parse_retry_count = 0
+    max_parse_retries = 2
+    retries_so_far = 0
+    total_wait = 0.0
+
+    while True:
         try:
-            res = groq_client.chat.completions.create(**kwargs)
-            if inspect.isawaitable(res):
-                response = await res
-            else:
-                response = res
+            response = await llm_client.chat.completions.create(**kwargs)
             break
-        except Exception as exc:
-            if attempt == 0 and _is_retryable_error(exc):
+        except BadRequestError as b_exc:
+            is_parse_err, failed_gen = _extract_parse_failed_generation(b_exc)
+            if is_parse_err:
+                gen_preview = redact(str(failed_gen or ""))[:300]
                 logger.warning(
-                    "Groq API call encountered transient error (%s). Retrying in %.2fs...",
-                    exc,
-                    backoff,
+                    "LLM BadRequestError: output_parse_failed (attempt %d/%d). Failed generation: %s",
+                    parse_retry_count + 1,
+                    max_parse_retries + 1,
+                    gen_preview,
                 )
-                await asyncio.sleep(backoff)
-                continue
+                if parse_retry_count < max_parse_retries:
+                    parse_retry_count += 1
+                    emit(f"model output was malformed, retrying ({parse_retry_count}/2)")
+                    await asyncio.sleep(0.5)
+                    continue
+                raise LLMOutputParseError(
+                    f"LLM API failed with output_parse_failed after {parse_retry_count} retries: {b_exc}",
+                    failed_generation=failed_gen,
+                ) from b_exc
             raise
+        except Exception as exc:
+            if not _is_retryable_error(exc) or retries_so_far >= MAX_TRANSIENT_RETRIES:
+                raise
+
+            wait = _retry_after_seconds(exc, backoff * 2**retries_so_far)
+            if total_wait + wait > MAX_TOTAL_BACKOFF_S:
+                emit(f"rate limit wait of {wait:g}s is too long, giving up")
+                raise
+
+            emit(f"waiting {wait:g}s before retry ({type(exc).__name__})")
+            logger.warning(
+                "LLM API call encountered transient error (%s). Retrying in %.2fs...",
+                exc,
+                wait,
+            )
+            await asyncio.sleep(wait)
+            total_wait += wait
+            retries_so_far += 1
 
     if response is None:
-        raise RuntimeError("No response received from Groq API")
+        raise RuntimeError("No response received from LLM API")
 
     # Extract choices and message
     choice = response.choices[0]

@@ -61,6 +61,7 @@ async def test_upsert_project_idempotent(mock_db) -> None:
         },
     )
     assert p1["status"] == "queued"
+    assert p1["project_id"] == str(p1["_id"])
 
     # Idempotent update
     p2 = await upsert_project(
@@ -77,6 +78,7 @@ async def test_upsert_project_idempotent(mock_db) -> None:
     )
     assert p2["status"] == "ingesting"
     assert p2["head_sha"] == "abc2"
+    assert p2["project_id"] == p1["project_id"]
 
     count = await mock_db.projects.count_documents({"repo_full_name": "octocat/Hello-World"})
     assert count == 1

@@ -1,6 +1,21 @@
 from typing import Any
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import ASCENDING, TEXT, ReturnDocument
+
+
+async def find_project(db: AsyncIOMotorDatabase, project_id: str) -> dict[str, Any] | None:
+    """Find a project by its stable ID, supporting legacy IDs and repository names."""
+    project = await db.projects.find_one({"project_id": project_id})
+    if project:
+        return project
+
+    legacy_id: Any = ObjectId(project_id) if ObjectId.is_valid(project_id) else project_id
+    project = await db.projects.find_one({"_id": legacy_id})
+    if project:
+        return project
+
+    return await db.projects.find_one({"repo_full_name": project_id})
 
 
 async def init_indexes(db: AsyncIOMotorDatabase) -> None:
@@ -9,6 +24,7 @@ async def init_indexes(db: AsyncIOMotorDatabase) -> None:
     """
     # Unique compound / key indexes
     await db.projects.create_index([("repo_full_name", ASCENDING)], unique=True)
+    await db.projects.create_index([("project_id", ASCENDING)])
     await db.files.create_index([("project_id", ASCENDING), ("path", ASCENDING)], unique=True)
     await db.commits.create_index([("project_id", ASCENDING), ("sha", ASCENDING)], unique=True)
     await db.prs.create_index([("project_id", ASCENDING), ("number", ASCENDING)], unique=True)
@@ -56,7 +72,7 @@ async def init_indexes(db: AsyncIOMotorDatabase) -> None:
 async def upsert_project(db: AsyncIOMotorDatabase, data: dict[str, Any]) -> dict[str, Any]:
     """
     Idempotently insert or update a project record by repo_full_name.
-    Schema: repo_full_name, default_branch, status (queued|ingesting|ready|failed),
+    Schema: project_id, repo_full_name, default_branch, status (queued|ingesting|ready|failed),
     ingest_cap, head_sha, analysed_at, error.
     """
     repo_full_name = data["repo_full_name"]
@@ -66,6 +82,13 @@ async def upsert_project(db: AsyncIOMotorDatabase, data: dict[str, Any]) -> dict
         upsert=True,
         return_document=ReturnDocument.AFTER,
     )
+    project_id = str(data.get("project_id") or result.get("project_id") or result["_id"])
+    if result.get("project_id") != project_id:
+        await db.projects.update_one(
+            {"_id": result["_id"]},
+            {"$set": {"project_id": project_id}},
+        )
+        result["project_id"] = project_id
     return result
 
 
@@ -164,5 +187,4 @@ async def upsert_derived_fact(db: AsyncIOMotorDatabase, data: dict[str, Any]) ->
         return_document=ReturnDocument.AFTER,
     )
     return result
-
 

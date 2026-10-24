@@ -4,7 +4,6 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, Field
 
 from app.agent.tools.base import (
-    MAX_OUTPUT_CHARS,
     Tool,
     ToolOutput,
     make_commit_evidence,
@@ -13,7 +12,7 @@ from app.agent.tools.base import (
     make_file_evidence,
     make_pr_evidence,
 )
-from app.agent.tools.registry import ToolRegistry
+from app.agent.tools.registry import MAX_OUTPUT_CHARS, ToolRegistry
 from app.agent.tools import (
     build_registry,
     OverviewTool,
@@ -260,10 +259,10 @@ async def test_truncation_enforced_centrally_for_10000_chars(base_registry: Tool
     )
     assert isinstance(out, ToolOutput)
     assert out.truncated is True
-    # Length of result text must be at most 4000 plus marker length
+    # Length of result text must be at most the configured cap plus marker length
     assert len(out.text) <= MAX_OUTPUT_CHARS + 60
     assert out.text.startswith("A" * MAX_OUTPUT_CHARS)
-    assert "[truncated, 6000 more chars]" in out.text
+    assert "[truncated, 8000 more chars]" in out.text
     assert out.evidence_ids == ["file:dump.txt#L1-100"]
 
 
@@ -340,6 +339,54 @@ async def test_read_file_tool(mock_db: AsyncIOMotorDatabase) -> None:
     # Unknown file returns error
     out_err = await tool.run(seeded_project, tool.args_schema(path="does/not/exist.py"))
     assert "ERROR: File 'does/not/exist.py' not found" in out_err.text
+
+
+@pytest.mark.asyncio
+async def test_read_file_defaults_to_80_lines_and_marks_continuation(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    project_id = "proj_line_limit"
+    await mock_db.files.insert_one({
+        "project_id": project_id,
+        "path": "large.py",
+        "content": "\n".join(f"line {line}" for line in range(1, 501)),
+    })
+    tool = ReadFileTool(db=mock_db)
+
+    default_out = await tool.run(
+        project_id,
+        tool.args_schema(path="large.py", start=10),
+    )
+    assert "Lines 10-89 of 500" in default_out.text
+    assert "showing lines 10-89 of 500; call again with start=90 for more" in default_out.text
+
+    capped_out = await tool.run(
+        project_id,
+        tool.args_schema(path="large.py", start=10, end=500),
+    )
+    assert "Lines 10-89 of 500" in capped_out.text
+    assert "showing lines 10-89 of 500; call again with start=90 for more" in capped_out.text
+
+
+@pytest.mark.asyncio
+async def test_get_overview_finds_project_by_stable_project_id(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    project_id = "stable-overview-id"
+    await mock_db.projects.insert_one({
+        "_id": "mongo-internal-id",
+        "project_id": project_id,
+        "repo_full_name": "octocat/overview-repo",
+        "description": "A fixture project description.",
+        "default_branch": "develop",
+    })
+
+    tool = OverviewTool(db=mock_db)
+    out = await tool.run(project_id, tool.args_schema())
+
+    assert "Description: A fixture project description." in out.text
+    assert "Default Branch: develop" in out.text
+    assert "Project record not found" not in out.text
 
 
 @pytest.mark.asyncio
@@ -443,14 +490,22 @@ async def test_file_history_tool(mock_db: AsyncIOMotorDatabase) -> None:
 async def test_get_commit_tool_live_fetch(mock_db: AsyncIOMotorDatabase) -> None:
     seeded_project = await seed_project_data(mock_db)
 
-    # Mock GitHub live diff endpoint
-    diff_content = "diff --git a/src/main.py b/src/main.py\n+import fastapi\n"
+    # Mock the live GitHub commit response.
+    payload = {
+        "sha": "a1b2c3d4e5f67890123456789012345678901234",
+        "author": {"login": "octocat"},
+        "commit": {
+            "author": {"name": "Octo Cat", "date": "2026-03-02T10:00:00Z"},
+            "message": "Initial release",
+        },
+        "stats": {"additions": 120, "deletions": 10},
+        "files": [
+            {"filename": "package.json", "status": "added", "additions": 20, "deletions": 5},
+            {"filename": "src/main.py", "status": "modified", "additions": 100, "deletions": 5},
+        ],
+    }
     respx.get("https://api.github.com/repos/octocat/Hello-World/commits/a1b2c3d4e5f67890123456789012345678901234").mock(
-        return_value=httpx.Response(
-            200,
-            text=diff_content,
-            headers={"content-type": "application/vnd.github.diff; charset=utf-8"},
-        )
+        return_value=httpx.Response(200, json=payload)
     )
 
     async with GitHubClient(token="fake-token") as gh_client:
@@ -458,8 +513,10 @@ async def test_get_commit_tool_live_fetch(mock_db: AsyncIOMotorDatabase) -> None
         out = await tool.run(seeded_project, tool.args_schema(sha="a1b2c3d4e5f67890123456789012345678901234"))
         assert "Commit: a1b2c3d4e5f67890123456789012345678901234" in out.text
         assert "Author: octocat" in out.text
-        assert "Patch Diff (live from GitHub):" in out.text
-        assert "+import fastapi" in out.text
+        assert out.text.index("src/main.py") < out.text.index("package.json")
+        assert "Total additions: 120" in out.text
+        assert "Total deletions: 10" in out.text
+        assert "Call get_commit again with path=<file> to see that file's diff." in out.text
         assert "commit:a1b2c3d" in out.evidence_ids
 
 
@@ -470,22 +527,140 @@ async def test_get_commit_tool_diff_truncation_and_redaction(mock_db: AsyncIOMot
 
     # Oversized patch with secret token
     large_patch = "diff --git a/secret.py\n+ghp_abcdefghijklmnopqrstuvwxyz0123456789\n" + ("+" + "x" * 70 + "\n") * 60
-    assert len(large_patch) > 3000
+    payload = {
+        "sha": "a1b2c3d4e5f67890123456789012345678901234",
+        "commit": {"author": {}, "message": "Large patch"},
+        "files": [{"filename": "secret.py", "status": "modified", "patch": large_patch}],
+    }
 
     respx.get("https://api.github.com/repos/octocat/Hello-World/commits/a1b2c3d4e5f67890123456789012345678901234").mock(
         return_value=httpx.Response(
             200,
-            text=large_patch,
-            headers={"content-type": "application/vnd.github.diff"},
+            json=payload,
         )
     )
 
     async with GitHubClient(token="fake-token") as gh_client:
         tool = GetCommitTool(db=mock_db, github_client=gh_client)
-        out = await tool.run(seeded_project, tool.args_schema(sha="a1b2c3d"))
+        out = await tool.run(
+            seeded_project,
+            tool.args_schema(sha="a1b2c3d", path="secret.py"),
+        )
         assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" not in out.text
         assert "[REDACTED_GITHUB_TOKEN]" in out.text
-        assert "[patch truncated: showing first 3000 characters" in out.text
+        assert "[showing chars 1-1800" in out.text
+
+
+def _mock_commit_payload(files: list[dict]) -> dict:
+    return {
+        "sha": "a1b2c3d4e5f67890123456789012345678901234",
+        "author": {"login": "octocat"},
+        "commit": {
+            "author": {"name": "Octo Cat", "date": "2026-03-02T10:00:00Z"},
+            "message": "Improve repository",
+        },
+        "stats": {"additions": 30, "deletions": 20, "total": 50},
+        "files": files,
+    }
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_commit_path_returns_selected_file_patch(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    seeded_project = await seed_project_data(mock_db)
+    payload = _mock_commit_payload([
+        {
+            "filename": "src/main.py",
+            "status": "modified",
+            "additions": 2,
+            "deletions": 1,
+            "patch": "@@ -1 +1,2 @@\n-old\n+new\n+extra\n",
+        },
+        {
+            "filename": "other.py",
+            "status": "modified",
+            "additions": 1,
+            "deletions": 0,
+            "patch": "+other",
+        },
+    ])
+    respx.get(
+        "https://api.github.com/repos/octocat/Hello-World/commits/"
+        "a1b2c3d4e5f67890123456789012345678901234"
+    ).mock(return_value=httpx.Response(200, json=payload))
+
+    async with GitHubClient(token="fake-token") as gh_client:
+        tool = GetCommitTool(db=mock_db, github_client=gh_client)
+        out = await tool.run(
+            seeded_project,
+            tool.args_schema(sha="a1b2c3d", path="src/main.py"),
+        )
+
+    assert "File: src/main.py (removed lines (-): 1; added lines (+): 2)" in out.text
+    assert "@@ -1 +1,2 @@\n-old\n+new\n+extra\n" in out.text
+    assert "other.py" not in out.text
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_commit_path_patch_offset_paging(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    seeded_project = await seed_project_data(mock_db)
+    patch = "x" * 2200
+    payload = _mock_commit_payload([
+        {"filename": "src/main.py", "status": "modified", "patch": patch},
+    ])
+    respx.get(
+        "https://api.github.com/repos/octocat/Hello-World/commits/"
+        "a1b2c3d4e5f67890123456789012345678901234"
+    ).mock(return_value=httpx.Response(200, json=payload))
+
+    async with GitHubClient(token="fake-token") as gh_client:
+        tool = GetCommitTool(db=mock_db, github_client=gh_client)
+        first_page = await tool.run(
+            seeded_project,
+            tool.args_schema(sha="a1b2c3d", path="src/main.py"),
+        )
+        second_page = await tool.run(
+            seeded_project,
+            tool.args_schema(sha="a1b2c3d", path="src/main.py", offset=1800),
+        )
+
+    assert patch[:1800] in first_page.text
+    assert "[showing chars 1-1800 of 2200; call again with offset=1800]" in first_page.text
+    assert patch[1800:] in second_page.text
+    assert "[showing chars" not in second_page.text
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_commit_unknown_path_lists_first_ten_files(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    seeded_project = await seed_project_data(mock_db)
+    files = [
+        {"filename": f"file_{number}.py", "status": "modified"}
+        for number in range(12)
+    ]
+    payload = _mock_commit_payload(files)
+    respx.get(
+        "https://api.github.com/repos/octocat/Hello-World/commits/"
+        "a1b2c3d4e5f67890123456789012345678901234"
+    ).mock(return_value=httpx.Response(200, json=payload))
+
+    async with GitHubClient(token="fake-token") as gh_client:
+        tool = GetCommitTool(db=mock_db, github_client=gh_client)
+        out = await tool.run(
+            seeded_project,
+            tool.args_schema(sha="a1b2c3d", path="missing.py"),
+        )
+
+    assert out.text.startswith("ERROR: path not in this commit")
+    assert "file_0.py" in out.text and "file_9.py" in out.text
+    assert "file_10.py" not in out.text
 
 
 @pytest.mark.asyncio

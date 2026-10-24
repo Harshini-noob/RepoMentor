@@ -4,12 +4,12 @@ No LLM calls, strictly scoped to project_id.
 """
 
 from typing import Any
-from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, Field
 
 from app.agent.tools.base import Tool, ToolOutput
 from app.core.db import get_db
+from app.core.repositories import find_project
 
 
 class OverviewArgs(BaseModel):
@@ -36,11 +36,7 @@ class OverviewTool(Tool):
 
     async def run(self, project_id: str, args: OverviewArgs) -> ToolOutput:
         db = self._get_db()
-        p_query = {"_id": ObjectId(project_id)} if ObjectId.is_valid(project_id) else {"_id": project_id}
-        project = await db.projects.find_one(p_query)
-        if not project:
-            # Fallback to repo_full_name if project_id was passed as name
-            project = await db.projects.find_one({"repo_full_name": project_id})
+        project = await find_project(db, project_id)
 
         repo_name = project.get("repo_full_name", project_id) if project else project_id
         description = (project.get("description") or "No description available") if project else "Project record not found"

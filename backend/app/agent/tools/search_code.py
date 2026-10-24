@@ -22,8 +22,8 @@ class SearchCodeArgs(BaseModel):
     limit: int = Field(
         default=10,
         ge=1,
-        le=50,
-        description="Maximum number of search results to return (default: 10).",
+        le=15,
+        description="Maximum number of search results (default: 10, maximum: 15).",
     )
 
 
@@ -31,7 +31,8 @@ class SearchCodeTool(Tool):
     name = "search_code"
     description = (
         "Search source code files in the repository using text search or regex fallback. "
-        "Returns matching files, line numbers, and snippets."
+        "Returns up to 15 matching lines (default 10), with snippets capped at 160 characters. "
+        "Use read_file with a narrow range to inspect more context."
     )
     args_schema = SearchCodeArgs
 
@@ -52,7 +53,7 @@ class SearchCodeTool(Tool):
         try:
             filter_query: dict[str, Any] = {
                 "project_id": project_id,
-                "$text": {"$search": raw_query},
+                "$text": {"$search": raw_query, "$caseSensitive": False},
             }
             cursor = (
                 db.files.find(

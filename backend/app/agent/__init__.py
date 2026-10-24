@@ -1,4 +1,4 @@
-from app.agent.llm import chat, get_groq_client
+from app.agent.llm import chat, get_llm_client
 from app.agent.state import (
     AgentRun,
     LLMReply,
@@ -14,5 +14,5 @@ __all__ = [
     "ToolResult",
     "TraceStep",
     "chat",
-    "get_groq_client",
+    "get_llm_client",
 ]
