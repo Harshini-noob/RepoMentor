@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     mongodb_uri: str = "mongodb://localhost:27017"
     mongodb_db: str = "repomentor"
     github_token: str | None = None
+    groq_api_key: str | None = None
+    groq_model: str = "openai/gpt-oss-120b"
 
     model_config = SettingsConfigDict(
         env_file=(ENV_PATH, ".env"),
