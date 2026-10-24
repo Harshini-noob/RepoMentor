@@ -3,7 +3,7 @@ import mongomock_motor
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.agent.guards import RepeatedCallGuard
-from app.agent.llm import LLMOutputParseError
+from app.agent.llm import LLMDailyLimitError, LLMOutputParseError
 from app.agent.loop import _trim_old_tool_results, run_agent
 from app.agent.state import AgentRun, LLMReply, ToolCall
 from app.agent.tools import SearchCodeTool, build_registry
@@ -444,6 +444,16 @@ async def test_agent_three_parse_errors_finalizes(mock_db: AsyncIOMotorDatabase)
 @pytest.mark.asyncio
 async def test_agent_fallback_answer_when_finalization_fails(mock_db: AsyncIOMotorDatabase) -> None:
     seed_project = await seed_project_data(mock_db)
+    extra_files = [
+        {
+            "project_id": seed_project,
+            "path": f"src/extra_{index}.py",
+            "content": f"value = {index}\n",
+            "size": 10,
+        }
+        for index in range(11)
+    ]
+    await mock_db.files.insert_many(extra_files)
     call_idx = 0
 
     async def fake_chat(messages, tools=None):
@@ -454,7 +464,16 @@ async def test_agent_fallback_answer_when_finalization_fails(mock_db: AsyncIOMot
             # First call succeeds and gathers evidence
             return LLMReply(
                 content="Inspecting src/main.py",
-                tool_calls=[ToolCall(id="c1", name="read_file", arguments={"path": "src/main.py", "start": 1, "end": 2})],
+                tool_calls=[
+                    ToolCall(
+                        id=f"c{index}",
+                        name="read_file",
+                        arguments={"path": path, "start": 1, "end": 2},
+                    )
+                    for index, path in enumerate(
+                        ["src/main.py", *(file["path"] for file in extra_files)]
+                    )
+                ],
                 usage={"input_tokens": 80, "output_tokens": 20},
             )
         # All subsequent calls (including tools=None finalization) fail completely
@@ -472,8 +491,36 @@ async def test_agent_fallback_answer_when_finalization_fails(mock_db: AsyncIOMot
     assert run.final_answer is not None
     assert "Investigation terminated before completion" in run.final_answer
     assert "read_file" in run.final_answer
-    assert "file:src/main.py#L1-1" in run.final_answer
+    evidence_summary = run.final_answer.split("Evidence IDs gathered: ", 1)[1].split(
+        ". Could not determine", 1
+    )[0]
+    assert evidence_summary.count("file:") == 10
+    assert evidence_summary.endswith("(+2 more)")
     assert "Could not determine a definitive final answer" in run.final_answer
+
+
+@pytest.mark.asyncio
+async def test_daily_token_limit_finishes_with_provider_message(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    project_id = await seed_project_data(mock_db)
+    message = (
+        "Daily token limit reached for model test-model. "
+        "Try again later or change LLM_MODEL."
+    )
+
+    async def fake_chat(messages, tools=None):
+        raise LLMDailyLimitError(message)
+
+    run = await run_agent(
+        goal="Inspect the repository",
+        project_id=project_id,
+        db=mock_db,
+        chat_fn=fake_chat,
+    )
+
+    assert run.stop_reason == "error"
+    assert run.final_answer == message
 
 
 # (d) The guard treats differently-cased searches and None keys as the same call

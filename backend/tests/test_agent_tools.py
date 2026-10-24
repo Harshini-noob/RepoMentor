@@ -324,6 +324,7 @@ async def test_list_tree_tool(mock_db: AsyncIOMotorDatabase) -> None:
     assert "Tree for '.'" in out.text
     assert "package.json" in out.text
     assert "src/main.py" in out.text or "📁 src/" in out.text
+    assert out.evidence_ids == []
 
 
 @pytest.mark.asyncio
@@ -455,13 +456,35 @@ async def test_search_commits_tool(mock_db: AsyncIOMotorDatabase) -> None:
     # Search by message text
     out = await tool.run(seeded_project, tool.args_schema(query="FastAPI"))
     assert "Found 1 commits matching 'FastAPI'" in out.text
-    assert "commit a1b2c3d" in out.text
+    assert "a1b2c3d (2026-03-02) Initial release with FastAPI server" in out.text
+    assert "matched: message" in out.text
     assert "commit:a1b2c3d" in out.evidence_ids
+
+    # Search by SHA prefix
+    out_sha = await tool.run(seeded_project, tool.args_schema(query="a1b2c3d"))
+    assert "a1b2c3d" in out_sha.text
+    assert "matched: sha" in out_sha.text
+
+    # Search by a changed path substring
+    await mock_db.commits.update_one(
+        {"project_id": seeded_project, "sha": "b2c3d4e5f6789012345678901234567890123456"},
+        {
+            "$set": {
+                "files_changed": [
+                    {"filename": "src/utils.py"},
+                    {"filename": "src/logger_utils.py"},
+                ]
+            }
+        },
+    )
+    out_path_query = await tool.run(seeded_project, tool.args_schema(query="logger"))
+    assert "b2c3d4e" in out_path_query.text
+    assert "matched: path" in out_path_query.text
 
     # Search by path filter
     out_path = await tool.run(seeded_project, tool.args_schema(query="math", path="src/utils.py"))
     assert "Found 1 commits matching 'math'" in out_path.text
-    assert "commit b2c3d4e" in out_path.text
+    assert "- b2c3d4e" in out_path.text
 
     # Search with non-matching path
     out_none = await tool.run(seeded_project, tool.args_schema(query="math", path="package.json"))

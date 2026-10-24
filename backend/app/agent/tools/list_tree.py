@@ -95,17 +95,14 @@ class ListTreeTool(Tool):
             )
 
         lines = [f"Tree for '{args.path or '.'}' (depth={args.depth}):"]
-        evidence_ids = []
         for key in sorted(tree_entries.keys()):
             entry = tree_entries[key]
             if entry["type"] == "dir":
                 lines.append(f"📁 {key} ({entry['count']} files, {entry['size']} bytes)")
             else:
                 lines.append(f"📄 {key} ({entry['size']} bytes)")
-                if len(evidence_ids) < 15:
-                    evidence_ids.append(f"file:{entry['full_path']}#L1-1")
 
         return ToolOutput(
             text="\n".join(lines),
-            evidence_ids=evidence_ids,
+            evidence_ids=[],
         )

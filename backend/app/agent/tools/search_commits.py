@@ -13,7 +13,7 @@ from app.core.db import get_db
 
 
 class SearchCommitsArgs(BaseModel):
-    query: str = Field(..., description="Search keyword in commit messages or authors.")
+    query: str = Field(..., description="Commit message text, changed file path, or hash prefix.")
     path: str | None = Field(
         default=None,
         description="Optional file path substring to filter commits by files changed.",
@@ -28,10 +28,7 @@ class SearchCommitsArgs(BaseModel):
 
 class SearchCommitsTool(Tool):
     name = "search_commits"
-    description = (
-        "Search stored repository commits by message text, author, and changed files. "
-        "Allows finding when and why features or bugs were introduced."
-    )
+    description = "Search commits by message text, file path, or commit hash prefix."
     args_schema = SearchCommitsArgs
 
     def __init__(self, db: AsyncIOMotorDatabase | None = None) -> None:
@@ -47,12 +44,18 @@ class SearchCommitsTool(Tool):
             return ToolOutput(text="ERROR: Search query cannot be empty.", evidence_ids=[])
 
         query_regex = re.escape(raw_query)
+        or_filters: list[dict[str, Any]] = [
+            {"message": {"$regex": query_regex, "$options": "i"}},
+            {"files_changed.filename": {"$regex": query_regex, "$options": "i"}},
+            {"files_changed": {"$regex": query_regex, "$options": "i"}},
+        ]
+        is_sha_prefix = re.fullmatch(r"[0-9a-fA-F]{7,40}", raw_query) is not None
+        if is_sha_prefix:
+            or_filters.append({"sha": {"$regex": f"^{query_regex}", "$options": "i"}})
+
         filter_query: dict[str, Any] = {
             "project_id": project_id,
-            "$or": [
-                {"message": {"$regex": query_regex, "$options": "i"}},
-                {"author": {"$regex": query_regex, "$options": "i"}},
-            ],
+            "$or": or_filters,
         }
 
         if args.path:
@@ -67,15 +70,26 @@ class SearchCommitsTool(Tool):
             sha = doc.get("sha", "")
             sha7 = sha[:7]
             date = (doc.get("date") or "")[:10]
-            author = doc.get("author", "unknown")
-            msg = (doc.get("message") or "").replace("\n", " ")[:80]
-            adds = doc.get("additions", 0)
-            dels = doc.get("deletions", 0)
+            message = (doc.get("message") or "").split("\n", 1)[0][:120]
             changed = doc.get("files_changed", []) or []
-            file_sample = [f.get("filename") for f in changed[:3] if isinstance(f, dict) and f.get("filename")]
-            file_str = f" [files: {', '.join(file_sample)}]" if file_sample else ""
+            paths = [
+                item.get("filename") if isinstance(item, dict) else item
+                for item in changed
+            ]
+            matched = []
+            if raw_query.casefold() in (doc.get("message") or "").casefold():
+                matched.append("message")
+            if any(
+                isinstance(path, str) and raw_query.casefold() in path.casefold()
+                for path in paths
+            ):
+                matched.append("path")
+            if is_sha_prefix and sha.lower().startswith(raw_query.lower()):
+                matched.append("sha")
 
-            commits.append(f"- commit {sha7} ({date}) by {author} (+{adds}/-{dels}): {msg}{file_str}")
+            commits.append(
+                f"- {sha7} ({date}) {message} [matched: {', '.join(matched)}]"
+            )
             if sha:
                 evidence_ids.append(make_commit_evidence(sha))
 

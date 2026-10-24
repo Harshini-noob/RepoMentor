@@ -4,7 +4,7 @@ import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError, RateLimitError
 
-from app.agent.llm import chat
+from app.agent.llm import LLMDailyLimitError, chat
 from app.agent.state import (
     AgentRun,
     LLMReply,
@@ -249,6 +249,29 @@ async def test_chat_retry_on_rate_limit() -> None:
 
     assert reply.content == "Recovered after rate limit"
     assert mock_client.chat.completions.create.call_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit_message", ["tokens per day exceeded", "TPD limit exceeded"])
+async def test_chat_daily_token_limit_raises_without_retry(limit_message: str) -> None:
+    req = httpx.Request("POST", "https://api.groq.com/chat")
+    resp_429 = httpx.Response(429, request=req)
+    rate_err = RateLimitError(limit_message, response=resp_429, body={"error": limit_message})
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create.side_effect = rate_err
+
+    with pytest.raises(LLMDailyLimitError) as exc_info:
+        await chat(
+            messages=[{"role": "user", "content": "daily limit test"}],
+            client=mock_client,
+            model="test-model",
+        )
+
+    assert str(exc_info.value) == (
+        "Daily token limit reached for model test-model. "
+        "Try again later or change LLM_MODEL."
+    )
+    mock_client.chat.completions.create.assert_awaited_once()
 
 
 @pytest.mark.asyncio

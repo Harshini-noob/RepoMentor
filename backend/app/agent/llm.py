@@ -15,6 +15,7 @@ same OpenAI-compatible REST API. Routing through this single wrapper means:
 import asyncio
 import json
 import logging
+import re
 from typing import Any, Callable
 
 from openai import (
@@ -42,6 +43,10 @@ class LLMOutputParseError(Exception):
     def __init__(self, message: str, failed_generation: str | None = None) -> None:
         super().__init__(message)
         self.failed_generation = failed_generation
+
+
+class LLMDailyLimitError(Exception):
+    """Raised when the provider reports that the model's daily token quota is exhausted."""
 
 
 _client: AsyncOpenAI | None = None
@@ -202,6 +207,15 @@ async def chat(
                 ) from b_exc
             raise
         except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            error_text = f"{exc} {getattr(exc, 'body', '')}".lower()
+            if status == 429 and (
+                "tokens per day" in error_text or re.search(r"\btpd\b", error_text)
+            ):
+                raise LLMDailyLimitError(
+                    f"Daily token limit reached for model {selected_model}. "
+                    "Try again later or change LLM_MODEL."
+                ) from exc
             if not _is_retryable_error(exc) or retries_so_far >= MAX_TRANSIENT_RETRIES:
                 raise
 

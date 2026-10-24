@@ -46,6 +46,14 @@ async def _async_main(project_id: str, question: str) -> int:
         on_event=on_event,
     )
 
+    if (
+        run_result.stop_reason == "error"
+        and run_result.final_answer
+        and run_result.final_answer.startswith("Daily token limit reached for model ")
+    ):
+        print(" ".join(run_result.final_answer.split()))
+        return 2
+
     print("=== Final Answer ===")
     print(run_result.final_answer or "(No final answer produced)")
     print(f"Stop Reason: {run_result.stop_reason}")

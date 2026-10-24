@@ -14,7 +14,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.agent.evidence import count_tags, find_unsupported_citations
 
 from app.agent.guards import HISTORY_TOOLS, RepeatedCallGuard, is_why_question, should_warn_wrap_up
-from app.agent.llm import LLMOutputParseError, chat as default_chat
+from app.agent.llm import LLMDailyLimitError, LLMOutputParseError, chat as default_chat
 from app.agent.state import AgentRun, LLMReply, ToolCall, TraceStep
 from app.agent.tools import build_registry
 from app.agent.tools.base import ToolOutput
@@ -64,6 +64,15 @@ def _trim_old_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any
             )
         trimmed_messages.append(copied_message)
     return trimmed_messages
+
+
+def _format_evidence_ids(steps: list[TraceStep]) -> str:
+    evidence_ids = sorted({eid for step in steps for eid in step.evidence_ids})
+    if not evidence_ids:
+        return "none"
+    shown = ", ".join(evidence_ids[:10])
+    remaining = len(evidence_ids) - 10
+    return f"{shown} (+{remaining} more)" if remaining > 0 else shown
 
 
 async def run_agent(
@@ -339,6 +348,9 @@ async def run_agent(
                 final_tokens = (final_reply.usage.get("input_tokens", 0) + final_reply.usage.get("output_tokens", 0)) if final_reply.usage else 0
                 total_tokens += final_tokens
                 final_answer = final_reply.content or None
+            except LLMDailyLimitError as limit_exc:
+                stop_reason = "error"
+                final_answer = str(limit_exc)
             except Exception as fin_exc:
                 logger.warning("Finalization LLM call failed: %s", fin_exc)
                 final_answer = None
@@ -347,23 +359,25 @@ async def run_agent(
             if not final_answer:
                 stop_reason = "error"
                 tools_used = sorted(list({s.tool for s in steps if s.tool and s.tool != "error"}))
-                evidence_collected = sorted(list({eid for s in steps for eid in s.evidence_ids}))
                 tools_str = ", ".join(tools_used) if tools_used else "none"
-                ev_str = ", ".join(evidence_collected) if evidence_collected else "none"
+                ev_str = _format_evidence_ids(steps)
                 final_answer = (
                     f"Investigation terminated before completion ({stop_reason}). "
                     f"Tools used: {tools_str}. Evidence IDs gathered: {ev_str}. "
                     "Could not determine a definitive final answer due to execution errors."
                 )
 
+    except LLMDailyLimitError as exc:
+        logger.warning("Daily LLM token limit reached: %s", exc)
+        stop_reason = "error"
+        final_answer = str(exc)
     except Exception as exc:
         logger.exception("Agent run encountered unhandled error: %s", exc)
         stop_reason = "error"
         # Deterministic fallback answer listing tools and evidence
         tools_used = sorted(list({s.tool for s in steps if s.tool and s.tool != "error"}))
-        evidence_collected = sorted(list({eid for s in steps for eid in s.evidence_ids}))
         tools_str = ", ".join(tools_used) if tools_used else "none"
-        ev_str = ", ".join(evidence_collected) if evidence_collected else "none"
+        ev_str = _format_evidence_ids(steps)
         final_answer = (
             f"Investigation terminated before completion (error: {redact(str(exc))[:200]}). "
             f"Tools used: {tools_str}. Evidence IDs gathered: {ev_str}. "
