@@ -13,7 +13,11 @@ def _format_value(value: Any) -> str:
     return str(value)
 
 
-def show_results(results_path: Path, only: set[str] | None = None) -> None:
+def show_results(
+    results_path: Path,
+    only: set[str] | None = None,
+    show_tool_results: bool = False,
+) -> None:
     with results_path.open(encoding="utf-8") as results_file:
         payload = json.load(results_file)
 
@@ -70,6 +74,9 @@ def show_results(results_path: Path, only: set[str] | None = None) -> None:
             "unverified_citations",
             "tagged",
             "content_ok",
+            "no_bad_claim",
+            "false_abstention",
+            "fact_uncited",
         )
         printed_metric = False
         for name in metric_names:
@@ -81,6 +88,14 @@ def show_results(results_path: Path, only: set[str] | None = None) -> None:
 
         print("Final answer:")
         print(result.get("answer") or "(missing answer)")
+        if show_tool_results:
+            print("Tool result texts:")
+            tool_texts = result.get("tool_texts", [])
+            if isinstance(tool_texts, list) and tool_texts:
+                for index, text in enumerate(tool_texts, start=1):
+                    print(f"  [{index}] {text}")
+            else:
+                print("  (none)")
         print()
 
 
@@ -88,6 +103,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results_json", type=Path)
     parser.add_argument("--only", help="Comma-separated question IDs to display.")
+    parser.add_argument(
+        "--show-results",
+        action="store_true",
+        help="Print saved tool result texts.",
+    )
     args = parser.parse_args()
 
     if hasattr(sys.stdout, "reconfigure"):
@@ -98,7 +118,7 @@ def main() -> None:
         if args.only is not None
         else None
     )
-    show_results(args.results_json, only)
+    show_results(args.results_json, only, show_tool_results=args.show_results)
 
 
 if __name__ == "__main__":

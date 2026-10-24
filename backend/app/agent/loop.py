@@ -14,8 +14,10 @@ from typing import Any, Callable
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.agent.evidence import (
     count_tags,
+    find_uncited_facts,
     find_unsupported_citations,
     find_unverified_quotes,
+    remove_unverified_code_blocks,
 )
 
 from app.agent.guards import HISTORY_TOOLS, RepeatedCallGuard, is_why_question, should_warn_wrap_up
@@ -53,20 +55,43 @@ def _notify(callback: Callable[..., Any] | None, *args: Any) -> None:
             logger.debug("Progress callback failed", exc_info=True)
 
 
-def _trim_old_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _trim_old_tool_results(
+    messages: list[dict[str, Any]],
+    pinned_results: dict[int, str] | None = None,
+    restore_pinned: bool = False,
+) -> list[dict[str, Any]]:
+    pinned_results = pinned_results or {}
     tool_message_indexes = [
         index for index, message in enumerate(messages) if message.get("role") == "tool"
     ]
-    keep_indexes = set(tool_message_indexes[-2:])
+    pinned_indexes = set(pinned_results) & set(tool_message_indexes)
+    other_indexes = [
+        index for index in tool_message_indexes if index not in pinned_indexes
+    ]
+    keep_indexes = set(other_indexes[-3:])
+    pinned_lengths = {
+        index: len(pinned_results[index]) for index in pinned_indexes
+    }
+    excess = max(0, sum(pinned_lengths.values()) - 6000)
+    pinned_limits: dict[int, int] = {}
+    for index in sorted(pinned_indexes):
+        trim = min(excess, pinned_lengths[index])
+        pinned_limits[index] = pinned_lengths[index] - trim
+        excess -= trim
+
     trimmed_messages: list[dict[str, Any]] = []
     for index, message in enumerate(messages):
         copied_message = dict(message)
-        if message.get("role") == "tool" and index not in keep_indexes:
-            content = message.get("content") or ""
+        if index in pinned_indexes:
+            full_text = pinned_results[index]
             copied_message["content"] = (
-                f"{content[:300]}\n"
-                "[older result trimmed to save tokens; repeat the same call to see it again]"
+                full_text
+                if restore_pinned
+                else full_text[:pinned_limits[index]]
             )
+        elif message.get("role") == "tool" and index not in keep_indexes:
+            content = message.get("content") or ""
+            copied_message["content"] = content[:300]
         trimmed_messages.append(copied_message)
     return trimmed_messages
 
@@ -136,6 +161,8 @@ async def run_agent(
     parse_error_count = 0
     tool_result_cache: dict[str, str] = {}
     tool_texts: list[str] = []
+    pinned_results: dict[int, str] = {}
+    search_code_call_count = 0
     recent_tool_results: list[tuple[str, bool]] = []
     history_nudge_sent = False
     tag_nudge_sent = False
@@ -143,6 +170,7 @@ async def run_agent(
     policy_nudge_count = 0
     repair_done = False
     repair_pending = False
+    restore_pinned_for_next_call = False
 
     try:
         step_idx = 0
@@ -165,9 +193,14 @@ async def run_agent(
             try:
                 _notify(on_event, f"thinking... (step {step_idx}/{max_steps})")
                 llm_kwargs: dict[str, Any] = {
-                    "messages": _trim_old_tool_results(messages),
+                    "messages": _trim_old_tool_results(
+                        messages,
+                        pinned_results,
+                        restore_pinned=restore_pinned_for_next_call,
+                    ),
                     "tools": None if repair_pending else schemas,
                 }
+                restore_pinned_for_next_call = False
                 if on_event is not None:
                     llm_kwargs["on_event"] = on_event
                 reply: LLMReply = await llm_chat(**llm_kwargs)
@@ -231,6 +264,7 @@ async def run_agent(
                             "each part Fact, Inferred or Uncertain."
                         ),
                     })
+                    restore_pinned_for_next_call = True
                     nudge_step = TraceStep(
                         step=step_idx,
                         thought_summary=reply.content[:160] if reply.content else None,
@@ -262,6 +296,7 @@ async def run_agent(
                             "keeping the same citations. Do not call tools unless needed."
                         ),
                     })
+                    restore_pinned_for_next_call = True
                     nudge_step = TraceStep(
                         step=step_idx,
                         thought_summary=reply.content[:160] if reply.content else None,
@@ -279,20 +314,35 @@ async def run_agent(
                 answer = reply.content or ""
                 collected = {eid for step in steps for eid in step.evidence_ids}
                 unsupported = find_unsupported_citations(answer, collected)
-                unverified_quotes = find_unverified_quotes(answer, tool_texts)
+                unverified_quotes = find_unverified_quotes(
+                    answer, tool_texts, evidence_ids=collected
+                )
+                uncited_facts = find_uncited_facts(answer)
                 repair_items = [*unsupported, *unverified_quotes][:5]
                 if repair_items and not repair_done and step_idx < max_steps:
                     repair_done = True
                     repair_pending = True
+                    restore_pinned_for_next_call = True
                     messages.append({"role": "assistant", "content": answer})
-                    messages.append({
-                        "role": "user",
-                        "content": (
+                    repair_prompt = ""
+                    if repair_items:
+                        repair_prompt = (
                             "These strings do not appear in any tool result: "
                             f"{', '.join(repair_items)}. "
                             "Rewrite your answer removing or correcting them using only tool output. "
                             "Keep the tags and valid citations. Do not call tools."
-                        ),
+                        )
+                    if uncited_facts:
+                        if repair_prompt:
+                            repair_prompt += "\n"
+                        repair_prompt += (
+                            "These [Fact] claims have no citation: "
+                            + " | ".join(fact[:200] for fact in uncited_facts[:5])
+                            + ". Add a citation from a tool result or change the tag to [Inferred]"
+                        )
+                    messages.append({
+                        "role": "user",
+                        "content": repair_prompt,
                     })
                     repair_step = TraceStep(
                         step=step_idx,
@@ -340,8 +390,18 @@ async def run_agent(
                 tool_output: ToolOutput
                 call_key = repeated_guard._call_key(tc.name, args)
                 was_repeated = repeated_guard.is_repeated(tc.name, args)
+                if tc.name == "search_code":
+                    search_code_call_count += 1
 
-                if was_repeated:
+                if tc.name == "search_code" and search_code_call_count > 4:
+                    tool_output = ToolOutput(
+                        text=(
+                            "ERROR: search budget used (4). Use read_file, get_facts, "
+                            "get_commit, or answer now."
+                        ),
+                        evidence_ids=[],
+                    )
+                elif was_repeated:
                     cached_text = tool_result_cache[call_key]
                     tool_output = ToolOutput(
                         text="(repeated call, returning the earlier result)\n" + cached_text[:2000],
@@ -352,10 +412,9 @@ async def run_agent(
                     tool_output = await reg.execute(tc.name, args, project_id)
                     tool_result_cache[call_key] = tool_output.text
 
-                full_tool_text = tool_result_cache[call_key]
-                tool_texts.append(full_tool_text)
+                tool_texts.append(tool_output.text)
                 recent_tool_results.append(
-                    (full_tool_text, was_repeated)
+                    (tool_output.text, was_repeated)
                 )
                 recent_tool_results = recent_tool_results[-2:]
 
@@ -367,7 +426,7 @@ async def run_agent(
                     thought_summary=reply.content[:160] if reply.content else None,
                     tool=tc.name,
                     args=args,
-                    result_preview=tool_output.text[:200] if tool_output.text else "",
+                    result_preview=tool_output.text[:2000] if tool_output.text else "",
                     evidence_ids=tool_output.evidence_ids,
                     ms=elapsed_ms,
                     tokens=call_tokens,
@@ -376,12 +435,18 @@ async def run_agent(
                 _notify(on_step, step_record)
 
                 # Append tool result message to conversation
+                tool_message_index = len(messages)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "name": tc.name,
                     "content": tool_output.text,
                 })
+                if (
+                    tc.name in {"read_file", "get_facts"}
+                    or (tc.name == "get_commit" and args.get("path"))
+                ):
+                    pinned_results[tool_message_index] = tool_output.text
                 stagnant = len(recent_tool_results) == 2 and (
                     all(repeated for _, repeated in recent_tool_results)
                     or all(_is_empty_tool_result(text) for text, _ in recent_tool_results)
@@ -422,7 +487,9 @@ async def run_agent(
             try:
                 _notify(on_event, "writing final answer from the evidence so far...")
                 final_llm_kwargs: dict[str, Any] = {
-                    "messages": _trim_old_tool_results(messages),
+                    "messages": _trim_old_tool_results(
+                        messages, pinned_results, restore_pinned=True
+                    ),
                     "tools": None,
                 }
                 if on_event is not None:
@@ -471,6 +538,24 @@ async def run_agent(
             {ord(char): None for char in "\u200b\u200c\u200d\ufeff"}
         )
         collected = {eid for s in steps for eid in s.evidence_ids}
+        unverified_quotes = find_unverified_quotes(
+            final_answer, tool_texts, evidence_ids=collected
+        )
+        if repair_done:
+            removed_code_issues = [
+                issue
+                for issue in unverified_quotes
+                if issue.startswith("code lines not found in any tool result:")
+            ]
+            final_answer = remove_unverified_code_blocks(
+                final_answer, tool_texts, evidence_ids=collected
+            )
+            unverified_quotes = list(dict.fromkeys([
+                *removed_code_issues,
+                *find_unverified_quotes(
+                    final_answer, tool_texts, evidence_ids=collected
+                ),
+            ]))
         unsupported = find_unsupported_citations(final_answer, collected)
         if unsupported:
             final_answer += (
@@ -478,7 +563,6 @@ async def run_agent(
                 + ", ".join(unsupported)
                 + "]"
             )
-        unverified_quotes = find_unverified_quotes(final_answer, tool_texts)
         if unverified_quotes:
             shown_quotes = unverified_quotes[:5]
             quote_note = "[Quotes not found in any tool result: " + ", ".join(

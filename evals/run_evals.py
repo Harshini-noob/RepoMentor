@@ -14,7 +14,7 @@ REPO_DIR = Path(__file__).resolve().parents[1]
 BACKEND_DIR = REPO_DIR / "backend"
 sys.path.insert(0, str(BACKEND_DIR))
 
-from app.agent.evidence import find_unsupported_citations
+from app.agent.evidence import find_uncited_facts, find_unsupported_citations
 from app.agent.guards import RepeatedCallGuard
 from app.agent.loop import run_agent
 from app.agent.state import AgentRun
@@ -133,6 +133,12 @@ def evaluate_result(
         "content_ok": content_ok,
         "no_bad_claim": no_bad_claim,
         "false_abstention": false_abstention,
+        "fact_uncited": len(find_uncited_facts(answer)),
+        "tool_texts": [
+            str(step.result_preview or "")[:2000]
+            for step in run.steps
+            if step.tool and step.tool not in {"policy_nudge", "policy_repair", "error"}
+        ],
         "answer": answer,
         "traces": traces,
     }
@@ -186,6 +192,8 @@ async def run_evaluations(
                 "content_ok": not question.get("answer_must_contain_any"),
                 "no_bad_claim": True,
                 "false_abstention": False,
+                "fact_uncited": 0,
+                "tool_texts": [],
                 "answer": f"Evaluation failed: {type(exc).__name__}: {exc}",
                 "traces": [],
             })
@@ -228,6 +236,7 @@ def _make_summary(results: list[dict[str, Any]], model: str) -> dict[str, Any]:
         "content_ok",
         "no_bad_claim",
         "false_abstention",
+        "fact_uncited",
     )
     count = len(results)
     averages = {
@@ -277,6 +286,7 @@ def _print_results(
         "content_ok",
         "no_bad_claim",
         "false_abstention",
+        "fact_uncited",
     )
     print(" | ".join(columns))
     for result in results:
@@ -300,6 +310,7 @@ def _print_results(
         f"content_ok_rate={averages['content_ok']:.2%} | "
         f"no_bad_claim_rate={averages['no_bad_claim']:.2%} | "
         f"false_abstention_rate={averages['false_abstention']:.2%} | "
+        f"average_fact_uncited={averages['fact_uncited']:.2f} | "
         f"average_tokens={averages['total_tokens']:.2f} | "
         f"average_seconds={averages['seconds']:.2f}"
     )

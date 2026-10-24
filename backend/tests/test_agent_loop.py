@@ -6,6 +6,7 @@ from app.agent.guards import RepeatedCallGuard
 from app.agent.llm import LLMDailyLimitError, LLMOutputParseError
 from app.agent.loop import _trim_old_tool_results, run_agent
 from app.agent.state import AgentRun, LLMReply, ToolCall
+from app.agent.tools.base import ToolOutput
 from app.agent.tools import SearchCodeTool, build_registry
 
 
@@ -115,6 +116,12 @@ async def test_unverified_answer_is_repaired_once_and_replaced(
         assert any(
             message.get("role") == "user"
             and "These strings do not appear in any tool result:" in message.get("content", "")
+            for message in messages
+        )
+        assert any(
+            message.get("role") == "user"
+            and "These [Fact] claims have no citation:" in message.get("content", "")
+            and "change the tag to [Inferred]" in message.get("content", "")
             for message in messages
         )
         return LLMReply(content="[Fact] The source prints hello.", tool_calls=[])
@@ -1016,19 +1023,191 @@ async def test_why_question_history_nudge_is_sent_at_most_once(
     assert [step.tool for step in run.steps] == ["policy_nudge"]
 
 
-def test_old_tool_results_are_trimmed_but_recent_two_are_preserved() -> None:
+def test_old_search_results_are_trimmed_but_three_recent_nonpinned_results_remain() -> None:
     messages = [
-        {"role": "tool", "content": "a" * 400},
-        {"role": "tool", "content": "recent one"},
-        {"role": "tool", "content": "recent two"},
+        {"role": "tool", "name": "search_code", "content": "a" * 400},
+        {"role": "tool", "name": "list_tree", "content": "recent one"},
+        {"role": "tool", "name": "list_tree", "content": "recent two"},
+        {"role": "tool", "name": "list_tree", "content": "recent three"},
     ]
 
     trimmed = _trim_old_tool_results(messages)
 
-    assert trimmed[0]["content"] == (
-        "a" * 300
-        + "\n[older result trimmed to save tokens; repeat the same call to see it again]"
-    )
+    assert trimmed[0]["content"] == "a" * 300
     assert trimmed[1]["content"] == "recent one"
     assert trimmed[2]["content"] == "recent two"
+    assert trimmed[3]["content"] == "recent three"
     assert messages[0]["content"] == "a" * 400
+
+
+def test_pinned_history_budget_trims_oldest_first_and_can_restore_full_text() -> None:
+    messages = [
+        {"role": "tool", "name": "read_file", "content": "old"},
+        {"role": "tool", "name": "get_facts", "content": "new"},
+    ]
+    pinned = {0: "a" * 4000, 1: "b" * 4000}
+
+    capped = _trim_old_tool_results(messages, pinned)
+    restored = _trim_old_tool_results(messages, pinned, restore_pinned=True)
+
+    assert len(capped[0]["content"]) == 2000
+    assert capped[1]["content"] == "b" * 4000
+    assert sum(len(capped[index]["content"]) for index in pinned) == 6000
+    assert restored[0]["content"] == "a" * 4000
+    assert restored[1]["content"] == "b" * 4000
+
+
+@pytest.mark.asyncio
+async def test_old_pinned_commit_diff_is_full_during_finalization(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    diff = "diff --git a/src/core.py b/src/core.py\n" + "+important diff line\n" * 120
+    final_messages: list[dict] = []
+
+    class StubRegistry:
+        def schemas(self):
+            return []
+
+        async def execute(self, name, args, project_id):
+            if name == "get_commit":
+                return ToolOutput(text=diff, evidence_ids=["commit:abcdef1:src/core.py"])
+            return ToolOutput(text=f"result {args.get('path', '')}")
+
+    call_number = 0
+
+    async def fake_chat(messages, tools=None):
+        nonlocal call_number
+        if tools is None:
+            final_messages.extend(messages)
+            return LLMReply(content="[Uncertain] I could not determine the answer.")
+        call_number += 1
+        if call_number == 3:
+            tool_call = ToolCall(
+                id=f"call-{call_number}",
+                name="get_commit",
+                arguments={"sha": "abcdef1", "path": "src/core.py"},
+            )
+        else:
+            tool_call = ToolCall(
+                id=f"call-{call_number}",
+                name="list_tree",
+                arguments={"path": f"dir-{call_number}"},
+            )
+        return LLMReply(content="Inspecting.", tool_calls=[tool_call])
+
+    run = await run_agent(
+        goal="Summarize the commit.",
+        project_id="proj_pinned_finalization",
+        max_steps=10,
+        db=mock_db,
+        registry=StubRegistry(),
+        chat_fn=fake_chat,
+    )
+
+    assert run.stop_reason == "max_steps"
+    assert call_number == 10
+    pinned_message = next(
+        message
+        for message in final_messages
+        if message.get("role") == "tool" and message.get("name") == "get_commit"
+    )
+    assert pinned_message["content"] == diff
+
+
+@pytest.mark.asyncio
+async def test_fifth_search_code_call_returns_budget_error(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    executed_queries: list[str] = []
+    seen_budget_error = False
+
+    class StubRegistry:
+        def schemas(self):
+            return []
+
+        async def execute(self, name, args, project_id):
+            executed_queries.append(args["query"])
+            return ToolOutput(text=f"found {args['query']}")
+
+    call_number = 0
+
+    async def fake_chat(messages, tools=None):
+        nonlocal call_number, seen_budget_error
+        if any(
+            message.get("role") == "tool"
+            and message.get("content", "").startswith("ERROR: search budget used (4).")
+            for message in messages
+        ):
+            seen_budget_error = True
+        call_number += 1
+        if call_number <= 5:
+            return LLMReply(
+                content="Searching.",
+                tool_calls=[
+                    ToolCall(
+                        id=f"search-{call_number}",
+                        name="search_code",
+                        arguments={"query": f"query-{call_number}"},
+                    )
+                ],
+            )
+        return LLMReply(content="[Uncertain] I have no more searches to run.", tool_calls=[])
+
+    await run_agent(
+        goal="Search the code.",
+        project_id="proj_search_budget",
+        max_steps=6,
+        db=mock_db,
+        registry=StubRegistry(),
+        chat_fn=fake_chat,
+    )
+
+    assert executed_queries == ["query-1", "query-2", "query-3", "query-4"]
+    assert seen_budget_error
+
+
+@pytest.mark.asyncio
+async def test_unverified_fenced_block_is_removed_after_failed_repair(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    project_id = await seed_project_data(mock_db)
+    calls = 0
+    invented_block = '```python\nsecret_value = "not in source"\n```'
+
+    async def fake_chat(messages, tools=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return LLMReply(
+                content="Reading source.",
+                tool_calls=[
+                    ToolCall(
+                        id="read-code",
+                        name="read_file",
+                        arguments={"path": "src/main.py", "start": 1, "end": 1},
+                    )
+                ],
+            )
+        if calls == 2:
+            return LLMReply(
+                content=f"[Inferred] Example:\n{invented_block}",
+                tool_calls=[],
+            )
+        assert tools is None
+        return LLMReply(
+            content=f"[Inferred] Corrected answer still includes:\n{invented_block}",
+            tool_calls=[],
+        )
+
+    run = await run_agent(
+        goal="Show a code example.",
+        project_id=project_id,
+        max_steps=4,
+        db=mock_db,
+        chat_fn=fake_chat,
+    )
+
+    assert calls == 3
+    assert invented_block not in run.final_answer
+    assert "[code block removed: lines not found in any tool result]" in run.final_answer
+    assert "[Quotes not found in any tool result:" in run.final_answer

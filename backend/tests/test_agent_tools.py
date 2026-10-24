@@ -465,6 +465,10 @@ async def test_get_facts_tool(mock_db: AsyncIOMotorDatabase) -> None:
     tool = FactsTool(db=mock_db)
     # Default excludes test facts
     out = await tool.run(seeded_project, tool.args_schema(include_tests=False))
+    assert out.text.startswith(
+        "1 all facts found (complete list from static analysis of the stored files; "
+        "it detects Python decorator routes, Express routes, and import-based facts)"
+    )
     assert "[route] GET /hello" in out.text
     assert "[test]" not in out.text
 

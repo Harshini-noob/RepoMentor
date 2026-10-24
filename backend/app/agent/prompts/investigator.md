@@ -20,3 +20,6 @@ Search and tool-use rules
 - If get_overview shows route, database or llm_provider facts, call get_facts with that kind.
 - For 'when was X first added' use search_commits with order=oldest, not search_code.
 - If a tool says no pull requests exist, say so in the answer.
+- Every [Fact] must carry at least one citation (file:, commit:, dep:, fact:). Without one, tag it [Inferred].
+- get_facts lists every detected fact of its kind. Do not repeat its findings with search_code.
+- After four search_code calls, stop searching code; use read_file, get_facts, get_commit, or answer.

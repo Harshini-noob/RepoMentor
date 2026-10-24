@@ -1,5 +1,6 @@
 from app.agent.evidence import (
     count_tags,
+    find_uncited_facts,
     find_unverified_quotes,
     find_unsupported_citations as check,
 )
@@ -127,3 +128,25 @@ def test_prose_between_two_fenced_blocks_is_not_paired_as_inline_code() -> None:
         "code lines not found in any tool result: print('first block')",
         "code lines not found in any tool result: some other block",
     ]
+
+
+def test_uncited_fact_paragraphs_and_bullets_are_detected() -> None:
+    answer = (
+        "[Fact] The service uses a cache.\n\n"
+        "- [Fact] The cache is in memory.\n"
+        "- [Fact] The code includes a file citation [file:cache.py#L1-2].\n\n"
+        "[Inferred] This may improve latency."
+    )
+
+    assert find_uncited_facts(answer) == [
+        "[Fact] The service uses a cache.",
+        "- [Fact] The cache is in memory.",
+    ]
+
+
+def test_path_spans_present_in_evidence_ids_are_not_flagged() -> None:
+    assert find_unverified_quotes(
+        "The provider is `providers/groq_provider.py`.",
+        [],
+        evidence_ids={"file:providers/groq_provider.py#L1-5"},
+    ) == []

@@ -91,7 +91,42 @@ def find_unsupported_citations(answer: str, evidence_ids) -> list[str]:
     return bad
 
 
-def find_unverified_quotes(answer: str, tool_texts) -> list[str]:
+def find_uncited_facts(answer: str) -> list[str]:
+    """Find fact-tagged paragraphs or bullets without an evidence ID."""
+    blocks: list[str] = []
+    current: list[str] = []
+
+    def flush() -> None:
+        if current:
+            blocks.append("\n".join(current).strip())
+            current.clear()
+
+    for line in answer.splitlines():
+        stripped = line.strip()
+        is_bullet = bool(re.match(r"^(?:[-*+]\s+)", stripped))
+        if not stripped:
+            flush()
+        elif is_bullet:
+            flush()
+            current.append(stripped)
+        else:
+            current.append(line)
+    flush()
+
+    uncited: list[str] = []
+    for block in blocks:
+        if not re.match(r"^(?:[-*+]\s+)?\[Fact\]", block, re.IGNORECASE):
+            continue
+        has_evidence_id = any(
+            CITE_RE.fullmatch(token.rstrip(".;:"))
+            for token in EVIDENCE_TOKEN_RE.findall(block)
+        )
+        if not has_evidence_id:
+            uncited.append(block)
+    return uncited
+
+
+def find_unverified_quotes(answer: str, tool_texts, evidence_ids=()) -> list[str]:
     """Return code lines and quoted spans not found in tool output."""
     normalised_results = []
     for text in tool_texts:
@@ -101,6 +136,9 @@ def find_unverified_quotes(answer: str, tool_texts) -> list[str]:
                 line = line[1:]
             cleaned_lines.append(line)
         normalised_results.append(_normalise_whitespace("\n".join(cleaned_lines)))
+    normalised_results.extend(
+        _normalise_whitespace(str(evidence_id)) for evidence_id in evidence_ids
+    )
 
     unverified: list[str] = []
     code_failure_count = 0
@@ -147,3 +185,16 @@ def find_unverified_quotes(answer: str, tool_texts) -> list[str]:
             record_if_missing(match.group(1), 20)
 
     return unverified
+
+
+def remove_unverified_code_blocks(answer: str, tool_texts, evidence_ids=()) -> str:
+    """Replace fenced blocks containing lines not found in tool output."""
+    def replace_block(match: re.Match[str]) -> str:
+        issues = find_unverified_quotes(
+            match.group(0), tool_texts, evidence_ids=evidence_ids
+        )
+        if any(issue.startswith("code lines not found in any tool result:") for issue in issues):
+            return "[code block removed: lines not found in any tool result]"
+        return match.group(0)
+
+    return FENCED_CODE_RE.sub(replace_block, answer)

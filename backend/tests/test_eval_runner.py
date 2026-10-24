@@ -10,7 +10,7 @@ if str(REPO_DIR) not in sys.path:
     sys.path.insert(0, str(REPO_DIR))
 
 from app.agent.state import AgentRun, TraceStep
-from evals import run_evals
+from evals import run_evals, show_results as show_results_module
 
 
 def test_evaluate_result_computes_metrics_and_keeps_trace() -> None:
@@ -26,7 +26,10 @@ def test_evaluate_result_computes_metrics_and_keeps_trace() -> None:
         goal="Question?",
         project_id="test",
         stop_reason="answered",
-        final_answer="[Fact] Verified at file:src/main.py#L1-2.",
+        final_answer=(
+            "[Fact] Verified at file:src/main.py#L1-2.\n\n"
+            "[Fact] This second statement has no citation."
+        ),
         total_tokens=27,
         steps=[
             TraceStep(
@@ -34,6 +37,7 @@ def test_evaluate_result_computes_metrics_and_keeps_trace() -> None:
                 tool="search_code",
                 args={"query": "main"},
                 evidence_ids=["file:src/main.py#L1-2"],
+                result_preview="first tool result text",
             ),
             TraceStep(
                 step=2,
@@ -62,6 +66,12 @@ def test_evaluate_result_computes_metrics_and_keeps_trace() -> None:
     assert result["content_ok"] is True
     assert result["no_bad_claim"] is True
     assert result["false_abstention"] is False
+    assert result["fact_uncited"] == 1
+    assert result["tool_texts"] == [
+        "first tool result text",
+        "",
+        "",
+    ]
     assert len(result["traces"]) == 3
 
 
@@ -191,11 +201,13 @@ def test_summary_excludes_not_applicable_evidence_hits() -> None:
             {"completed": True, "steps": 2, "total_tokens": 10, "seconds": 1.0,
              "tool_recall": 1.0, "unnecessary_calls": 0, "unverified_citations": 0,
              "tagged": True, "content_ok": True, "no_bad_claim": True,
-             "false_abstention": False, "evidence_hit": True, "tool_ok": True},
+             "false_abstention": False, "fact_uncited": 0,
+             "evidence_hit": True, "tool_ok": True},
             {"completed": False, "steps": 4, "total_tokens": 30, "seconds": 3.0,
              "tool_recall": 0.0, "unnecessary_calls": 2, "unverified_citations": 1,
              "tagged": False, "content_ok": False, "no_bad_claim": False,
-             "false_abstention": True, "evidence_hit": None, "tool_ok": False},
+             "false_abstention": True, "fact_uncited": 2,
+             "evidence_hit": None, "tool_ok": False},
         ],
         "test-model",
     )
@@ -203,6 +215,7 @@ def test_summary_excludes_not_applicable_evidence_hits() -> None:
     assert summary["averages"]["evidence_hit"] == 1.0
     assert summary["averages"]["tool_ok"] == 0.5
     assert summary["averages"]["false_abstention"] == 0.5
+    assert summary["averages"]["fact_uncited"] == 1
     assert summary["averages"]["total_tokens"] == 20
     assert summary["averages"]["seconds"] == 2
 
@@ -265,6 +278,32 @@ async def test_run_evaluations_continues_after_question_failure(
     saved = json.loads(result_files[0].read_text(encoding="utf-8"))
     assert saved["model"] == "test-model"
     assert len(saved["results"]) == 2
+
+
+def test_show_results_prints_saved_tool_texts_when_requested(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results_path = tmp_path / "results.json"
+    results_path.write_text(
+        json.dumps({
+            "results": [{
+                "id": "sample",
+                "question": "Question?",
+                "stop_reason": "answered",
+                "traces": [],
+                "answer": "[Fact] Done.",
+                "tool_texts": ["tool output"],
+            }]
+        }),
+        encoding="utf-8",
+    )
+
+    show_results_module.show_results(results_path, show_tool_results=True)
+
+    output = capsys.readouterr().out
+    assert "Tool result texts:" in output
+    assert "tool output" in output
 
 
 async def _no_sleep(seconds: float) -> None:

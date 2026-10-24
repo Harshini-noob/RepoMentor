@@ -23,7 +23,7 @@ class FactsArgs(BaseModel):
 
 class FactsTool(Tool):
     name = "get_facts"
-    description = "List statically derived architecture and code facts with file and line references."
+    description = "The list is complete for its kind; do not re-verify it with search_code."
     args_schema = FactsArgs
 
     def __init__(self, db: AsyncIOMotorDatabase | None = None) -> None:
@@ -44,7 +44,7 @@ class FactsTool(Tool):
             if not args.kind or args.kind != "test":
                 filter_query["kind"] = {"$ne": "test"}
 
-        cursor = db.derived_facts.find(filter_query).sort([("kind", 1), ("file_path", 1)]).limit(args.limit)
+        cursor = db.derived_facts.find(filter_query).sort([("kind", 1), ("file_path", 1)])
         facts = []
         evidence_ids = []
 
@@ -68,14 +68,15 @@ class FactsTool(Tool):
             if len(evidence_ids) < 30:
                 evidence_ids.append(make_file_evidence(file_path, l_start, l_end))
 
+        kind_label = args.kind or "all"
+        header = (
+            f"{len(facts)} {kind_label} facts found (complete list from static analysis "
+            "of the stored files; it detects Python decorator routes, Express routes, "
+            "and import-based facts)"
+        )
         if not facts:
-            filter_desc = f" for kind '{args.kind}'" if args.kind else ""
-            return ToolOutput(
-                text=f"No derived facts found{filter_desc} for this project.",
-                evidence_ids=[],
-            )
+            return ToolOutput(text=header, evidence_ids=[])
 
-        header = f"Derived Code Facts ({len(facts)} returned):"
         output_text = header + "\n" + "\n".join(facts)
         return ToolOutput(
             text=output_text,
