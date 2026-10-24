@@ -16,11 +16,7 @@ class TimelineArgs(BaseModel):
 
 class TimelineTool(Tool):
     name = "get_timeline"
-    description = (
-        "Get project evolution and churn timeline: weekly commit activity, "
-        "top modified files, biggest commits by diff size, and first-seen dates "
-        "for dependencies and top-level directories."
-    )
+    description = "Summarize weekly commit activity, churn, biggest commits, and first-seen dependencies and directories."
     args_schema = TimelineArgs
 
     def __init__(self, db: AsyncIOMotorDatabase | None = None) -> None:

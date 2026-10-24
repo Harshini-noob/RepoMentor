@@ -32,16 +32,16 @@ LOCKFILES = {
 
 
 class GetCommitArgs(BaseModel):
-    sha: str = Field(..., description="Commit SHA or 7-character short SHA to inspect.")
-    path: str | None = Field(default=None, description="Optional changed file path to inspect.")
-    offset: int = Field(default=0, ge=0, description="Character offset for paging through a file patch.")
+    sha: str
+    path: str | None = None
+    offset: int = Field(default=0, ge=0)
 
 
 class GetCommitTool(Tool):
     name = "get_commit"
     description = (
-        "Use first without path to see which files changed; then call with path for the 1-3 files that matter. "
-        "Removed lines (-) show what a commit replaced."
+        "Call first without path to list changed files, then with path for 1-3 relevant diffs; "
+        "removed lines show replacements."
     )
     args_schema = GetCommitArgs
 

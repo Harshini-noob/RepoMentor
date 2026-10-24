@@ -5,7 +5,7 @@ No LLM calls, strictly scoped to project_id.
 
 from typing import Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.agent.tools.base import Tool, ToolOutput
 from app.core.db import get_db
@@ -13,19 +13,12 @@ from app.core.repositories import find_project
 
 
 class OverviewArgs(BaseModel):
-    include_tests: bool = Field(
-        default=False,
-        description="Whether to include test-related derived facts in counts and details.",
-    )
+    include_tests: bool = False
 
 
 class OverviewTool(Tool):
     name = "get_overview"
-    description = (
-        "Get a high-level summary of the repository from stored metadata. "
-        "Returns repository description, detected languages, dependencies, "
-        "derived code fact counts by kind, and timeline summary without making LLM calls."
-    )
+    description = "Summarize repository metadata, languages, dependencies, code facts, and timeline."
     args_schema = OverviewArgs
 
     def __init__(self, db: AsyncIOMotorDatabase | None = None) -> None:

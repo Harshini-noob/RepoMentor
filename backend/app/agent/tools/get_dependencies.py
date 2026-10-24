@@ -5,25 +5,19 @@ Scoped to project_id.
 
 from typing import Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.agent.tools.base import Tool, ToolOutput, make_dep_evidence
 from app.core.db import get_db
 
 
 class DependenciesArgs(BaseModel):
-    kind: str | None = Field(
-        default=None,
-        description="Filter by dependency kind: 'runtime', 'dev', 'base_image', etc.",
-    )
+    kind: str | None = None
 
 
 class DependenciesTool(Tool):
     name = "get_dependencies"
-    description = (
-        "Get project dependencies parsed from package manifests (package.json, "
-        "requirements.txt, pyproject.toml, Dockerfile). Returns package name, version, and ecosystem."
-    )
+    description = "List parsed project dependencies with versions and ecosystems."
     args_schema = DependenciesArgs
 
     def __init__(self, db: AsyncIOMotorDatabase | None = None) -> None:

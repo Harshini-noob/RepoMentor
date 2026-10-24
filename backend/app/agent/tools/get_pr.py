@@ -12,15 +12,12 @@ from app.core.db import get_db
 
 
 class GetPRArgs(BaseModel):
-    number: int = Field(..., ge=1, description="Pull request number (e.g. 42).")
+    number: int = Field(..., ge=1)
 
 
 class GetPRTool(Tool):
     name = "get_pr"
-    description = (
-        "Get detailed information for a specific pull request from stored data, "
-        "including title, author/state, body description, modified files, and reviewer comments."
-    )
+    description = "Show a pull request's title, state, body, changed files, and comments."
     args_schema = GetPRArgs
 
     def __init__(self, db: AsyncIOMotorDatabase | None = None) -> None:

@@ -13,16 +13,12 @@ from app.core.db import get_db
 
 
 class SearchCommitsArgs(BaseModel):
-    query: str = Field(..., description="Commit message text, changed file path, or hash prefix.")
-    path: str | None = Field(
-        default=None,
-        description="Optional file path substring to filter commits by files changed.",
-    )
+    query: str
+    path: str | None = None
     limit: int = Field(
         default=10,
         ge=1,
         le=50,
-        description="Maximum number of commits to return (default: 10).",
     )
 
 

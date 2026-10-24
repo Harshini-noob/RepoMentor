@@ -11,21 +11,17 @@ from app.core.db import get_db
 
 
 class ReadFileArgs(BaseModel):
-    path: str = Field(..., description="Path of the file in the repository (e.g. 'src/index.ts').")
-    start: int = Field(default=1, ge=1, description="1-based starting line number (default: 1).")
+    path: str
+    start: int = Field(default=1, ge=1)
     end: int | None = Field(
         default=None,
         ge=1,
-        description="1-based ending line number; reads at most 80 lines per call.",
     )
 
 
 class ReadFileTool(Tool):
     name = "read_file"
-    description = (
-        "Read file content line by line with line numbers. "
-        "Reads at most 80 lines per call; request a narrow range and call again using the continuation marker."
-    )
+    description = "Read up to 80 lines of a repository file; use the continuation marker to request more."
     args_schema = ReadFileArgs
 
     def __init__(self, db: AsyncIOMotorDatabase | None = None) -> None:

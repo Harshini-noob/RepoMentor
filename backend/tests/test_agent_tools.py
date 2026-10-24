@@ -491,6 +491,24 @@ async def test_search_commits_tool(mock_db: AsyncIOMotorDatabase) -> None:
     assert "No commits found" in out_none.text
 
 
+def test_tool_descriptions_are_at_most_25_words_and_arguments_are_compact() -> None:
+    registry = build_registry()
+    schemas = registry.schemas()
+
+    for schema in schemas:
+        function = schema["function"]
+        assert len(function["description"].split()) <= 25
+        for argument in function["parameters"].get("properties", {}).values():
+            assert "description" not in argument
+
+    get_commit = next(
+        schema["function"] for schema in schemas
+        if schema["function"]["name"] == "get_commit"
+    )
+    assert "first without path" in get_commit["description"]
+    assert "then with path" in get_commit["description"]
+
+
 @pytest.mark.asyncio
 async def test_file_history_tool(mock_db: AsyncIOMotorDatabase) -> None:
     seeded_project = await seed_project_data(mock_db)

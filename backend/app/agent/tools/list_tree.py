@@ -12,24 +12,17 @@ from app.core.db import get_db
 
 
 class ListTreeArgs(BaseModel):
-    path: str = Field(
-        default="",
-        description="Subdirectory path to list (e.g. 'src' or 'backend/app'). Leave empty for project root.",
-    )
+    path: str = ""
     depth: int = Field(
         default=2,
         ge=1,
         le=10,
-        description="Depth limit for directory listing traversal (default is 2).",
     )
 
 
 class ListTreeTool(Tool):
     name = "list_tree"
-    description = (
-        "Explore directory tree structure and file sizes from stored files. "
-        "Allows navigating the repository layout up to a specified depth."
-    )
+    description = "List repository directories and file sizes."
     args_schema = ListTreeArgs
 
     def __init__(self, db: AsyncIOMotorDatabase | None = None) -> None:

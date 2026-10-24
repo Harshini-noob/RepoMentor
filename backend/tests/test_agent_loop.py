@@ -270,8 +270,8 @@ async def test_agent_nudges_once_after_second_repeated_call_result(
     call_count = 0
     nudge_counts: list[int] = []
     nudge_text = (
-        "You are repeating searches. Call a different tool (for example get_commit with a path) "
-        "or give your final answer now."
+        "Searches are not producing new evidence. Answer now from what you already have; "
+        "mark anything unsupported [Uncertain] and say what you could not check."
     )
 
     async def fake_chat(messages, tools=None):
@@ -307,6 +307,119 @@ async def test_agent_nudges_once_after_second_repeated_call_result(
 
     assert run.stop_reason == "answered"
     assert nudge_counts == [0, 0, 0, 1, 1]
+    assert "policy_nudge" in [step.tool for step in run.steps]
+
+
+def test_repeated_call_guard_drops_default_arguments_only() -> None:
+    guard = RepeatedCallGuard()
+    assert not guard.is_repeated("get_commit", {"sha": "a1b2c3d", "path": "src/main.py"})
+    assert guard.is_repeated(
+        "get_commit",
+        {"sha": "a1b2c3d", "path": "src/main.py", "offset": 0},
+    )
+
+    assert not guard.is_repeated("search_code", {"query": "needle"})
+    assert guard.is_repeated(
+        "search_code",
+        {"query": "needle", "limit": 10, "path_glob": ""},
+    )
+    assert not guard.is_repeated("search_code", {"query": "needle", "limit": 15})
+
+
+@pytest.mark.asyncio
+async def test_empty_search_results_trigger_stagnation_nudge_once(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    project_id = await seed_project_data(mock_db)
+    call_count = 0
+    nudge_text = (
+        "Searches are not producing new evidence. Answer now from what you already have; "
+        "mark anything unsupported [Uncertain] and say what you could not check."
+    )
+    nudge_seen: list[bool] = []
+
+    async def fake_chat(messages, tools=None):
+        nonlocal call_count
+        call_count += 1
+        nudge_seen.append(any(
+            message.get("role") == "user" and message.get("content") == nudge_text
+            for message in messages
+        ))
+        if call_count <= 2:
+            return LLMReply(
+                content="Searching.",
+                tool_calls=[
+                    ToolCall(
+                        id=f"search_{call_count}",
+                        name="search_code",
+                        arguments={"query": f"missing_{call_count}"},
+                    )
+                ],
+            )
+        return LLMReply(content="[Uncertain] Nothing was found.", tool_calls=[])
+
+    run = await run_agent(
+        goal="Find the missing details.",
+        project_id=project_id,
+        max_steps=5,
+        db=mock_db,
+        chat_fn=fake_chat,
+    )
+
+    assert nudge_seen == [False, False, True]
+    assert [step.tool for step in run.steps].count("policy_nudge") == 1
+    assert run.final_answer == "[Uncertain] Nothing was found."
+
+
+@pytest.mark.asyncio
+async def test_unverified_quote_note_uses_tool_results(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    project_id = await seed_project_data(mock_db)
+    await mock_db.files.update_one(
+        {"project_id": project_id, "path": "src/main.py"},
+        {"$set": {"content": "the configured timeout is 30 seconds\n"}},
+    )
+    call_count = 0
+
+    async def fake_chat(messages, tools=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return LLMReply(
+                content="Reading the file.",
+                tool_calls=[
+                    ToolCall(
+                        id="read_file",
+                        name="read_file",
+                        arguments={"path": "src/main.py", "start": 1, "end": 1},
+                    )
+                ],
+            )
+        return LLMReply(
+            content=(
+                '[Fact] The file says "the configured timeout is 30 seconds"; '
+                'it does not say "fabricated setting value number 1", '
+                '"fabricated setting value number 2", "fabricated setting value number 3", '
+                '"fabricated setting value number 4", "fabricated setting value number 5", '
+                'or "fabricated setting value number 6".'
+            ),
+            tool_calls=[],
+        )
+
+    run = await run_agent(
+        goal="What timeout is configured?",
+        project_id=project_id,
+        max_steps=4,
+        db=mock_db,
+        chat_fn=fake_chat,
+    )
+
+    assert run.final_answer is not None
+    assert '"the configured timeout is 30 seconds"' in run.final_answer
+    quote_note = run.final_answer.split("[Quotes not found in any tool result: ", 1)[1]
+    assert quote_note.count('"fabricated setting value') == 5
+    assert quote_note.endswith("(+1 more)]")
 
 
 # (d) Never stops -> hits max_steps, triggers 70% wrap-up warning and final synthesis call
@@ -348,7 +461,9 @@ async def test_agent_never_stops_hits_max_steps(mock_db: AsyncIOMotorDatabase) -
     )
 
     assert run.stop_reason == "max_steps"
-    assert len(run.steps) == 4
+    assert len(run.steps) == 5
+    assert [step.tool for step in run.steps].count("list_tree") == 4
+    assert [step.tool for step in run.steps].count("policy_nudge") == 1
     assert wrap_up_seen_in_messages is True
     assert "Reached step budget" in (run.final_answer or "")
     assert "could not complete deep search" in (run.final_answer or "")
@@ -528,13 +643,13 @@ def test_repeated_call_guard_normalizes_case_and_none() -> None:
     guard = RepeatedCallGuard()
 
     # First call: lowercase 'supabase'
-    first = guard.is_repeated("search_code", {"query": "supabase", "limit": 15})
+    first = guard.is_repeated("search_code", {"query": "supabase", "limit": 10})
     assert first is False
 
     # Second call: uppercase 'Supabase' with path_glob=None and whitespace
     second = guard.is_repeated(
         "search_code",
-        {"query": "  Supabase  ", "path_glob": None, "limit": 10},
+        {"query": "  Supabase  ", "path_glob": None},
     )
     assert second is True
 

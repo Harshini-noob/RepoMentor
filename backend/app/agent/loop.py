@@ -7,11 +7,16 @@ and persistence to agent_traces collection in MongoDB.
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.agent.evidence import count_tags, find_unsupported_citations
+from app.agent.evidence import (
+    count_tags,
+    find_unsupported_citations,
+    find_unverified_quotes,
+)
 
 from app.agent.guards import HISTORY_TOOLS, RepeatedCallGuard, is_why_question, should_warn_wrap_up
 from app.agent.llm import LLMDailyLimitError, LLMOutputParseError, chat as default_chat
@@ -75,6 +80,19 @@ def _format_evidence_ids(steps: list[TraceStep]) -> str:
     return f"{shown} (+{remaining} more)" if remaining > 0 else shown
 
 
+STAGNATION_NUDGE = (
+    "Searches are not producing new evidence. Answer now from what you already have; "
+    "mark anything unsupported [Uncertain] and say what you could not check."
+)
+
+
+def _is_empty_tool_result(text: str) -> bool:
+    return bool(
+        re.search(r"\bno\b.*\bfound\b", text, re.IGNORECASE | re.DOTALL)
+        or re.search(r"\bno matching lines\b", text, re.IGNORECASE)
+    )
+
+
 async def run_agent(
     goal: str,
     project_id: str,
@@ -116,10 +134,11 @@ async def run_agent(
     schemas = reg.schemas()
     parse_error_count = 0
     tool_result_cache: dict[str, str] = {}
+    tool_texts: list[str] = []
+    recent_tool_results: list[tuple[str, bool]] = []
     history_nudge_sent = False
     tag_nudge_sent = False
-    repeated_call_count = 0
-    repeated_call_nudge_sent = False
+    stagnation_nudge_sent = False
 
     try:
         step_idx = 0
@@ -271,6 +290,7 @@ async def run_agent(
             messages.append(assistant_msg)
 
             # 2. Execute each tool call and collect results
+            stagnation_triggered = False
             for tc in reply.tool_calls:
                 args = tc.arguments if isinstance(tc.arguments, dict) else {}
                 tool_output: ToolOutput
@@ -278,7 +298,6 @@ async def run_agent(
                 was_repeated = repeated_guard.is_repeated(tc.name, args)
 
                 if was_repeated:
-                    repeated_call_count += 1
                     cached_text = tool_result_cache[call_key]
                     tool_output = ToolOutput(
                         text="(repeated call, returning the earlier result)\n" + cached_text[:2000],
@@ -288,6 +307,13 @@ async def run_agent(
                 else:
                     tool_output = await reg.execute(tc.name, args, project_id)
                     tool_result_cache[call_key] = tool_output.text
+
+                full_tool_text = tool_result_cache[call_key]
+                tool_texts.append(full_tool_text)
+                recent_tool_results.append(
+                    (full_tool_text, was_repeated)
+                )
+                recent_tool_results = recent_tool_results[-2:]
 
                 elapsed_ms = int((time.perf_counter() - t_start) * 1000)
 
@@ -312,15 +338,27 @@ async def run_agent(
                     "name": tc.name,
                     "content": tool_output.text,
                 })
-                if was_repeated and repeated_call_count >= 2 and not repeated_call_nudge_sent:
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "You are repeating searches. Call a different tool (for example "
-                            "get_commit with a path) or give your final answer now."
-                        ),
-                    })
-                    repeated_call_nudge_sent = True
+                stagnant = len(recent_tool_results) == 2 and (
+                    all(repeated for _, repeated in recent_tool_results)
+                    or all(_is_empty_tool_result(text) for text, _ in recent_tool_results)
+                )
+                if stagnant and not stagnation_nudge_sent:
+                    stagnation_triggered = True
+            if stagnation_triggered:
+                messages.append({"role": "user", "content": STAGNATION_NUDGE})
+                stagnation_nudge_sent = True
+                nudge_step = TraceStep(
+                    step=step_idx,
+                    thought_summary=reply.content[:160] if reply.content else None,
+                    tool="policy_nudge",
+                    args={},
+                    result_preview="Requested an answer after repeated or empty tool results.",
+                    evidence_ids=[],
+                    ms=int((time.perf_counter() - t_start) * 1000),
+                    tokens=call_tokens,
+                )
+                steps.append(nudge_step)
+                _notify(on_step, nudge_step)
 
         # Determine if finalization call is needed (on max_steps, parse error cutoff, or missing answer)
         if final_answer is None:
@@ -395,6 +433,15 @@ async def run_agent(
                 + ", ".join(unsupported)
                 + "]"
             )
+        unverified_quotes = find_unverified_quotes(final_answer, tool_texts)
+        if unverified_quotes:
+            shown_quotes = unverified_quotes[:5]
+            quote_note = "[Quotes not found in any tool result: " + ", ".join(
+                f'"{quote}"' for quote in shown_quotes
+            )
+            if len(unverified_quotes) > 5:
+                quote_note += f", (+{len(unverified_quotes) - 5} more)"
+            final_answer += "\n\n" + quote_note + "]"
     run_record = AgentRun(
         goal=goal,
         project_id=project_id,

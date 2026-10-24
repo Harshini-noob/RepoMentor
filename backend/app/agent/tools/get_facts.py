@@ -12,29 +12,18 @@ from app.core.db import get_db
 
 
 class FactsArgs(BaseModel):
-    kind: str | None = Field(
-        default=None,
-        description="Filter facts by kind: 'route', 'component', 'database', 'ml', 'llm_provider', 'ui_app', 'entry_point', 'env_var', 'test'.",
-    )
-    include_tests: bool = Field(
-        default=False,
-        description="Whether to include facts originating from test files (default: False).",
-    )
+    kind: str | None = None
+    include_tests: bool = False
     limit: int = Field(
         default=30,
         ge=1,
         le=200,
-        description="Maximum number of facts to return (default: 30).",
     )
 
 
 class FactsTool(Tool):
     name = "get_facts"
-    description = (
-        "Get statically derived architecture and code facts (API routes, React components, "
-        "database clients, ML/LLM libraries, UI frameworks, entry points, and environment variables) "
-        "with file and line references."
-    )
+    description = "List statically derived architecture and code facts with file and line references."
     args_schema = FactsArgs
 
     def __init__(self, db: AsyncIOMotorDatabase | None = None) -> None:

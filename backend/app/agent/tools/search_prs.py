@@ -6,26 +6,20 @@ Scoped to project_id.
 import re
 from typing import Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.agent.tools.base import Tool, ToolOutput, make_pr_evidence
 from app.core.db import get_db
 
 
 class SearchPRsArgs(BaseModel):
-    query: str = Field(..., description="Search keyword for pull request title or body.")
-    state: str | None = Field(
-        default=None,
-        description="Filter by PR state: 'open', 'closed', or None for all.",
-    )
+    query: str
+    state: str | None = None
 
 
 class SearchPRsTool(Tool):
     name = "search_prs"
-    description = (
-        "Search stored pull requests by keyword and optional state (open/closed). "
-        "Allows finding historical PRs, discussions, and feature decisions."
-    )
+    description = "Search pull requests by title or body, optionally filtered by state."
     args_schema = SearchPRsArgs
 
     def __init__(self, db: AsyncIOMotorDatabase | None = None) -> None:

@@ -59,13 +59,27 @@ class RepeatedCallGuard:
 
     def _call_key(self, tool_name: str, args: dict[str, Any]) -> str:
         # Canonical JSON string representation of normalized arguments
-        repeat_args = {key: value for key, value in args.items() if key != "limit"}
+        limit_defaults = {
+            "get_facts": 30,
+            "search_code": 10,
+            "search_commits": 10,
+        }
+        tool = tool_name.strip().lower()
+        repeat_args = {
+            key: value
+            for key, value in args.items()
+            if not (
+                (key == "offset" and value == 0)
+                or (key == "limit" and value == limit_defaults.get(tool))
+                or (key == "path_glob" and value in (None, ""))
+            )
+        }
         norm_args = normalize_arguments(repeat_args)
         try:
             sorted_args = json.dumps(norm_args, sort_keys=True)
         except Exception:
             sorted_args = str(norm_args)
-        return f"{tool_name.strip().lower()}::{sorted_args}"
+        return f"{tool}::{sorted_args}"
 
     def is_repeated(self, tool_name: str, args: dict[str, Any]) -> bool:
         """Return True if (tool_name, args) was already invoked in this run."""

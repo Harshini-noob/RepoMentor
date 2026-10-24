@@ -5,22 +5,19 @@ From stored commit data, scoped to project_id.
 
 from typing import Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.agent.tools.base import Tool, ToolOutput, make_commit_evidence, make_file_evidence
 from app.core.db import get_db
 
 
 class FileHistoryArgs(BaseModel):
-    path: str = Field(..., description="File path to retrieve commit history for (e.g. 'src/main.py').")
+    path: str
 
 
 class FileHistoryTool(Tool):
     name = "file_history"
-    description = (
-        "Retrieve the commit history for a specific file, ordered newest first. "
-        "Shows who modified the file, when, and with what commit message."
-    )
+    description = "Retrieve commits that changed a file, newest first, with author, date, and message."
     args_schema = FileHistoryArgs
 
     def __init__(self, db: AsyncIOMotorDatabase | None = None) -> None:

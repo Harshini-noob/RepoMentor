@@ -14,26 +14,18 @@ from app.core.db import get_db
 
 
 class SearchCodeArgs(BaseModel):
-    query: str = Field(..., description="Text query or keyword to search for.")
-    path_glob: str | None = Field(
-        default=None,
-        description="Optional glob pattern to filter file paths (e.g. '*.py', 'src/**', 'backend/**').",
-    )
+    query: str
+    path_glob: str | None = None
     limit: int = Field(
         default=10,
         ge=1,
         le=15,
-        description="Maximum number of search results (default: 10, maximum: 15).",
     )
 
 
 class SearchCodeTool(Tool):
     name = "search_code"
-    description = (
-        "Search source code files in the repository using text search or regex fallback. "
-        "Returns up to 15 matching lines (default 10), with snippets capped at 160 characters. "
-        "Use read_file with a narrow range to inspect more context."
-    )
+    description = "Search source lines and return matching snippets; use read_file for more context."
     args_schema = SearchCodeArgs
 
     def __init__(self, db: AsyncIOMotorDatabase | None = None) -> None:
