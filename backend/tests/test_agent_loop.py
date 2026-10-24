@@ -40,7 +40,7 @@ async def test_agent_answers_immediately(mock_db: AsyncIOMotorDatabase) -> None:
     seed_project = await seed_project_data(mock_db)
     async def fake_chat(messages, tools=None):
         return LLMReply(
-            content="This repository is a Python application that prints hello\u200bagent\u200c.\u200d\ufeff",
+            content="[Fact] This repository is a Python application that prints hello\u200bagent\u200c.\u200d\ufeff",
             tool_calls=[],
             usage={"input_tokens": 50, "output_tokens": 15},
         )
@@ -54,7 +54,7 @@ async def test_agent_answers_immediately(mock_db: AsyncIOMotorDatabase) -> None:
     )
 
     assert run.stop_reason == "answered"
-    assert run.final_answer == "This repository is a Python application that prints helloagent."
+    assert run.final_answer == "[Fact] This repository is a Python application that prints helloagent."
     assert len(run.steps) == 0
     assert run.total_tokens == 65
 
@@ -69,7 +69,7 @@ async def test_malformed_citation_is_added_to_unverified_note(
     mock_db: AsyncIOMotorDatabase,
 ) -> None:
     async def fake_chat(messages, tools=None):
-        return LLMReply(content="Citation [pr:abc].", tool_calls=[], usage={})
+        return LLMReply(content="Citation [pr:abc]. [Uncertain]", tool_calls=[], usage={})
 
     run = await run_agent(
         goal="Test malformed citation",
@@ -79,10 +79,96 @@ async def test_malformed_citation_is_added_to_unverified_note(
     )
 
     assert run.final_answer == (
-        "Citation [pr:abc].\n\n"
+        "Citation [pr:abc]. [Uncertain]\n\n"
         "[Unverified citations, not backed by any tool result in this run: "
         "malformed citation: pr:abc]"
     )
+
+
+@pytest.mark.asyncio
+async def test_untagged_answer_is_nudged_then_tagged_answer_is_accepted(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    project_id = await seed_project_data(mock_db)
+    call_count = 0
+    nudge_text = (
+        "Rewrite your answer with every claim tagged [Fact] (a tool result shows it), "
+        "[Inferred] (reasoned from several observations) or [Uncertain] (not supported), "
+        "keeping the same citations. Do not call tools unless needed."
+    )
+
+    async def fake_chat(messages, tools=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return LLMReply(content="The project uses Python.", tool_calls=[])
+        assert any(
+            message.get("role") == "user" and message.get("content") == nudge_text
+            for message in messages
+        )
+        return LLMReply(content="[Fact] The project uses Python.", tool_calls=[])
+
+    run = await run_agent(
+        goal="What language does the project use?",
+        project_id=project_id,
+        max_steps=3,
+        db=mock_db,
+        chat_fn=fake_chat,
+    )
+
+    assert run.final_answer == "[Fact] The project uses Python."
+    assert call_count == 2
+    assert [step.tool for step in run.steps] == ["policy_nudge"]
+
+
+@pytest.mark.asyncio
+async def test_tagged_answer_does_not_receive_tag_nudge(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    project_id = await seed_project_data(mock_db)
+    call_count = 0
+
+    async def fake_chat(messages, tools=None):
+        nonlocal call_count
+        call_count += 1
+        return LLMReply(content="[Inferred] This is a Python project.", tool_calls=[])
+
+    run = await run_agent(
+        goal="Summarize the project.",
+        project_id=project_id,
+        max_steps=3,
+        db=mock_db,
+        chat_fn=fake_chat,
+    )
+
+    assert run.final_answer == "[Inferred] This is a Python project."
+    assert call_count == 1
+    assert run.steps == []
+
+
+@pytest.mark.asyncio
+async def test_second_untagged_answer_is_accepted_with_note(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    project_id = await seed_project_data(mock_db)
+    call_count = 0
+
+    async def fake_chat(messages, tools=None):
+        nonlocal call_count
+        call_count += 1
+        return LLMReply(content=f"Untagged answer {call_count}.", tool_calls=[])
+
+    run = await run_agent(
+        goal="Summarize the project.",
+        project_id=project_id,
+        max_steps=3,
+        db=mock_db,
+        chat_fn=fake_chat,
+    )
+
+    assert run.final_answer == "Untagged answer 2.\n\n[No claim tags were produced]"
+    assert call_count == 2
+    assert [step.tool for step in run.steps] == ["policy_nudge"]
 
 
 # (b) Calls two tools then answers
@@ -108,7 +194,7 @@ async def test_agent_calls_two_tools_then_answers(mock_db: AsyncIOMotorDatabase)
             )
         else:
             return LLMReply(
-                content="src/main.py defines a script that outputs 'hello agent'.",
+                content="[Fact] src/main.py defines a script that outputs 'hello agent'.",
                 tool_calls=[],
                 usage={"input_tokens": 200, "output_tokens": 30},
             )
@@ -154,7 +240,7 @@ async def test_agent_repeats_same_call_blocked_by_guard(mock_db: AsyncIOMotorDat
             )
         else:
             return LLMReply(
-                content="Done after seeing repeated call notice.",
+                content="[Fact] Done after seeing repeated call notice.",
                 tool_calls=[],
                 usage={"input_tokens": 100, "output_tokens": 20},
             )
@@ -209,7 +295,7 @@ async def test_agent_nudges_once_after_second_repeated_call_result(
                 ],
                 usage={},
             )
-        return LLMReply(content="Final answer.", tool_calls=[], usage={})
+        return LLMReply(content="[Fact] Final answer.", tool_calls=[], usage={})
 
     run = await run_agent(
         goal="Test repeated searches",
@@ -445,7 +531,7 @@ async def test_agent_notifies_steps_in_order_and_ignores_callback_errors(
                 tool_calls=[ToolCall(id="call_1", name="list_tree", arguments={"path": "", "depth": 1})],
                 usage={"input_tokens": 5, "output_tokens": 3},
             )
-        return LLMReply(content="The repository was inspected.", tool_calls=[])
+        return LLMReply(content="[Fact] The repository was inspected.", tool_calls=[])
 
     def on_step(step) -> None:
         notified_steps.append(step)
@@ -542,7 +628,7 @@ async def test_why_question_nudges_history_check_then_accepts_answer(
                 ],
             )
         return LLMReply(
-            content="Fact: the code uses this database. Inferred: it was chosen for simplicity.",
+            content="[Fact] The code uses this database. [Inferred] It was chosen for simplicity.",
             tool_calls=[],
         )
 
@@ -557,7 +643,7 @@ async def test_why_question_nudges_history_check_then_accepts_answer(
     assert nudge_seen
     assert run.stop_reason == "answered"
     assert [step.tool for step in run.steps] == ["policy_nudge", "search_commits"]
-    assert "Fact:" in (run.final_answer or "")
+    assert "[Fact]" in (run.final_answer or "")
 
 
 @pytest.mark.asyncio
@@ -573,7 +659,7 @@ async def test_non_why_question_does_not_nudge_history_check(
             "Before answering a why-question" in str(message.get("content"))
             for message in messages
         )
-        return LLMReply(content="This is a Python project.", tool_calls=[])
+        return LLMReply(content="[Fact] This is a Python project.", tool_calls=[])
 
     run = await run_agent(
         goal="What language does this project use?",
@@ -614,7 +700,7 @@ async def test_why_question_with_prior_history_tool_does_not_nudge(
                     )
                 ],
             )
-        return LLMReply(content="The commit history explains the change.", tool_calls=[])
+        return LLMReply(content="[Fact] The commit history explains the change.", tool_calls=[])
 
     run = await run_agent(
         goal="Why was the database choice made?",
@@ -646,7 +732,7 @@ async def test_why_question_history_nudge_is_sent_at_most_once(
             if message.get("role") == "user"
             and "Before answering a why-question" in str(message.get("content"))
         ))
-        return LLMReply(content=f"Draft answer {call_count}.", tool_calls=[])
+        return LLMReply(content=f"[Uncertain] Draft answer {call_count}.", tool_calls=[])
 
     run = await run_agent(
         goal="Why is this project structured this way?",

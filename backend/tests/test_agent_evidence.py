@@ -1,4 +1,4 @@
-from app.agent.evidence import find_unsupported_citations as check
+from app.agent.evidence import count_tags, find_unsupported_citations as check
 
 
 def test_range_inside_read_is_ok() -> None:
@@ -37,3 +37,17 @@ def test_malformed_evidence_tokens_are_flagged() -> None:
 
 def test_malformed_token_substrings_are_not_citations() -> None:
     assert check("profile:logger.py", set()) == []
+
+
+def test_commit_path_citation_is_validated_against_collected_ids() -> None:
+    citation = "commit:a1b2c3d:src/main.py"
+    assert check(f"Changed [Fact] in {citation}.", {citation}) == []
+    assert check(f"Changed in {citation}.", {"commit:a1b2c3d"}) == [citation]
+
+
+def test_count_tags_is_case_insensitive() -> None:
+    assert count_tags("[fact] [INFERRED] [Uncertain] [Fact]") == {
+        "Fact": 2,
+        "Inferred": 1,
+        "Uncertain": 1,
+    }

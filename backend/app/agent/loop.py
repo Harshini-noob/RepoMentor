@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.agent.evidence import find_unsupported_citations
+from app.agent.evidence import count_tags, find_unsupported_citations
 
 from app.agent.guards import HISTORY_TOOLS, RepeatedCallGuard, is_why_question, should_warn_wrap_up
 from app.agent.llm import LLMOutputParseError, chat as default_chat
@@ -108,6 +108,7 @@ async def run_agent(
     parse_error_count = 0
     tool_result_cache: dict[str, str] = {}
     history_nudge_sent = False
+    tag_nudge_sent = False
     repeated_call_count = 0
     repeated_call_nudge_sent = False
 
@@ -207,7 +208,37 @@ async def run_agent(
                     steps.append(nudge_step)
                     _notify(on_step, nudge_step)
                     continue
+                if (
+                    not tag_nudge_sent
+                    and not any(count_tags(reply.content or "").values())
+                    and step_idx < max_steps
+                ):
+                    tag_nudge_sent = True
+                    messages.append({"role": "assistant", "content": reply.content or ""})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Rewrite your answer with every claim tagged [Fact] (a tool result shows it), "
+                            "[Inferred] (reasoned from several observations) or [Uncertain] (not supported), "
+                            "keeping the same citations. Do not call tools unless needed."
+                        ),
+                    })
+                    nudge_step = TraceStep(
+                        step=step_idx,
+                        thought_summary=reply.content[:160] if reply.content else None,
+                        tool="policy_nudge",
+                        args={},
+                        result_preview="Requested claim tags for the final answer.",
+                        evidence_ids=[],
+                        ms=int((time.perf_counter() - t_start) * 1000),
+                        tokens=call_tokens,
+                    )
+                    steps.append(nudge_step)
+                    _notify(on_step, nudge_step)
+                    continue
                 final_answer = reply.content or ""
+                if tag_nudge_sent and not any(count_tags(final_answer).values()):
+                    final_answer += "\n\n[No claim tags were produced]"
                 stop_reason = "answered"
                 break
 

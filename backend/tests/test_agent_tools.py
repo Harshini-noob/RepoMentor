@@ -502,6 +502,7 @@ async def test_get_commit_tool_live_fetch(mock_db: AsyncIOMotorDatabase) -> None
         "files": [
             {"filename": "package.json", "status": "added", "additions": 20, "deletions": 5},
             {"filename": "src/main.py", "status": "modified", "additions": 100, "deletions": 5},
+            {"filename": "uv.lock", "status": "modified", "additions": 10000, "deletions": 10000},
         ],
     }
     respx.get("https://api.github.com/repos/octocat/Hello-World/commits/a1b2c3d4e5f67890123456789012345678901234").mock(
@@ -513,7 +514,9 @@ async def test_get_commit_tool_live_fetch(mock_db: AsyncIOMotorDatabase) -> None
         out = await tool.run(seeded_project, tool.args_schema(sha="a1b2c3d4e5f67890123456789012345678901234"))
         assert "Commit: a1b2c3d4e5f67890123456789012345678901234" in out.text
         assert "Author: octocat" in out.text
-        assert out.text.index("src/main.py") < out.text.index("package.json")
+        assert out.text.index("src/main.py") < out.text.index("package.json") < out.text.index("uv.lock")
+        assert "| uv.lock | modified (lockfile, generated) |" in out.text
+        assert "Files changed: 3 total (3 shown)" in out.text
         assert "Total additions: 120" in out.text
         assert "Total deletions: 10" in out.text
         assert "Call get_commit again with path=<file> to see that file's diff." in out.text
@@ -601,6 +604,7 @@ async def test_get_commit_path_returns_selected_file_patch(
     assert "File: src/main.py (removed lines (-): 1; added lines (+): 2)" in out.text
     assert "@@ -1 +1,2 @@\n-old\n+new\n+extra\n" in out.text
     assert "other.py" not in out.text
+    assert "commit:a1b2c3d:src/main.py" in out.evidence_ids
 
 
 @pytest.mark.asyncio

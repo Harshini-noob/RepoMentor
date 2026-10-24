@@ -3,6 +3,7 @@ import re
 # Matches ids as tools emit them, plus the "#L10-L20" variant models like to write.
 CITE_RE = re.compile(
     r"(?:file:[^\s\]\)#,]+#L\d+(?:-L?\d+)?"
+    r"|commit:[0-9a-fA-F]{7,40}:[^\s\]\)#,]+"
     r"|commit:[0-9a-fA-F]{7,40}"
     r"|pr:\d+"
     r"|dep:[^\s\]\),]+"
@@ -14,6 +15,14 @@ EVIDENCE_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:file|commit|pr|dep|fact):[^\s\]\),]*"
 )
 FILE_RE = re.compile(r"file:(?P<path>[^#]+)#L(?P<s>\d+)(?:-L?(?P<e>\d+))?")
+
+
+def count_tags(answer: str) -> dict[str, int]:
+    """Count claim tags in an answer, ignoring tag-name case."""
+    counts = {"Fact": 0, "Inferred": 0, "Uncertain": 0}
+    for tag in re.findall(r"\[(Fact|Inferred|Uncertain)\]", answer, re.IGNORECASE):
+        counts[tag.capitalize()] += 1
+    return counts
 
 
 def _covered(evidence_ids):

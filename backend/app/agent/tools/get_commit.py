@@ -19,6 +19,16 @@ logger = logging.getLogger("repomentor.agent.tools.get_commit")
 MAX_PATCH_CHARS = 1800
 MAX_CHANGED_FILES = 40
 MAX_SUMMARY_CHARS = 1900
+LOCKFILES = {
+    "uv.lock",
+    "poetry.lock",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "Pipfile.lock",
+    "Cargo.lock",
+    "go.sum",
+}
 
 
 class GetCommitArgs(BaseModel):
@@ -126,6 +136,7 @@ class GetCommitTool(Tool):
                     evidence_ids=evidence_ids,
                 )
 
+            evidence_ids.append(f"{make_commit_evidence(full_sha)}:{requested_path}")
             patch = redact(str(file_entry.get("patch") or ""))
             removed = sum(
                 1 for line in patch.splitlines()
@@ -159,9 +170,9 @@ class GetCommitTool(Tool):
         sorted_files = sorted(
             (item for item in files if isinstance(item, dict)),
             key=lambda item: (
-                int(item.get("additions") or 0) + int(item.get("deletions") or 0)
+                str(item.get("filename", "")).rsplit("/", 1)[-1] in LOCKFILES,
+                -int(item.get("additions") or 0) - int(item.get("deletions") or 0),
             ),
-            reverse=True,
         )[:MAX_CHANGED_FILES]
         table = [
             "| File | Status | Additions | Deletions |",
@@ -171,8 +182,11 @@ class GetCommitTool(Tool):
             status = item.get("status", "modified")
             if status == "deleted":
                 status = "removed"
+            filename = item.get("filename", "")
+            if str(filename).rsplit("/", 1)[-1] in LOCKFILES:
+                status = f"{status} (lockfile, generated)"
             table.append(
-                f"| {item.get('filename', '')} | {status} | "
+                f"| {filename} | {status} | "
                 f"{item.get('additions', 0)} | {item.get('deletions', 0)} |"
             )
 
@@ -188,8 +202,7 @@ class GetCommitTool(Tool):
         footer = "Call get_commit again with path=<file> to see that file's diff."
         while True:
             shown_count = len(table) - 2
-            file_count = min(len(files), MAX_CHANGED_FILES)
-            caption = f"Changed files (showing top {shown_count} of {file_count}):"
+            caption = f"Files changed: {len(files)} total ({shown_count} shown)"
             text = "\n".join([*summary, caption, *table, "", footer])
             if len(text) <= MAX_SUMMARY_CHARS or len(table) <= 2:
                 break

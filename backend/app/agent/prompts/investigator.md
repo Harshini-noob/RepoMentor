@@ -43,3 +43,10 @@ Every substantive conclusion or claim in your final answer must be labeled with 
 - Statements about what a commit changed must rest on get_commit output for that commit. Reading a file at HEAD (search_code, read_file) shows today's code, not what the commit did. Never attribute a current file's content to a commit unless the commit's file list or diff shows that file.
 - For "what did commit X change or replace": call get_commit without path, then with path for the 1-3 most relevant files. Lines starting with "-" are what was replaced.
 - If the same tool returned the same result twice, change approach or answer. Do not try a third time.
+- search_code searches file CONTENTS, not file names. To read a file, call read_file with its path.
+- For a "why" answer, after finding the commit that introduced something, call get_commit on it and read the diff of the files that match the commit message.
+- For a commit question, say how many files the commit changed and which files you inspected. If you inspected fewer than all of them, name the files you did not inspect. Prefer the 2-3 largest source files; ignore lockfiles.
+- Line counts in a diff header are totals for the whole file. Never attribute a file's total additions or deletions to one specific change inside it.
+- Statements about what a commit changed must rest on get_commit output for that commit. Reading a file at HEAD shows today's code, not what the commit did.
+- Every paragraph or bullet of the final answer carries one tag: [Fact], [Inferred] or [Uncertain]. Cite per-file commit evidence as commit:<sha7>:<path>.
+- If the same tool returned the same result twice, change approach or answer. Do not try a third time.
