@@ -1,0 +1,328 @@
+{
+  "project": "proj_harshini_noob_llm_cost_copilot",
+  "model": "openai/gpt-oss-20b",
+  "created_at": "2026-10-24T17:16:44.081248+00:00",
+  "summary": {
+    "model": "openai/gpt-oss-20b",
+    "count": 3,
+    "averages": {
+      "completed": 0.3333333333333333,
+      "steps": 3.0,
+      "total_tokens": 7773.666666666667,
+      "seconds": 35.80548923333117,
+      "tool_recall": 0.3333333333333333,
+      "unnecessary_calls": 3.0,
+      "unverified_citations": 0.0,
+      "tagged": 0.3333333333333333,
+      "content_ok": 0.3333333333333333,
+      "no_bad_claim": 1.0,
+      "false_abstention": 0.0,
+      "fact_uncited": 0.3333333333333333,
+      "evidence_hit": 0.3333333333333333,
+      "tool_ok": 0.3333333333333333
+    }
+  },
+  "results": [
+    {
+      "id": "api-endpoints",
+      "category": "facts",
+      "question": "What API endpoints does this project expose?",
+      "model": "openai/gpt-oss-20b",
+      "completed": true,
+      "stop_reason": "answered",
+      "steps": 7,
+      "total_tokens": 20252,
+      "seconds": 105.67995069999597,
+      "tool_recall": 0.0,
+      "tool_ok": false,
+      "unnecessary_calls": 8,
+      "evidence_hit": true,
+      "unverified_citations": 0,
+      "tagged": true,
+      "content_ok": true,
+      "no_bad_claim": true,
+      "false_abstention": false,
+      "fact_uncited": 1,
+      "tool_texts": [
+        "Repository: Harshini-noob/llm-cost-copilot\nDescription: No description available\nDefault Branch: main\n\nLanguages: Python (51 files), Markdown (1 files), YAML (1 files), TOML (1 files)\n\nDependencies (13): google-genai (>=1.47.0) [runtime], groq [runtime], httpx (>=0.28.1) [runtime], pandas [runtime], python (3.11-slim) [base_image], python-dotenv [runtime], requests (>=2.28) [runtime], requests [runtime], sentence-transformers (>=5.1.2) [runtime], streamlit [runtime], supabase (>=2.31.0) [runtime], supabase [runtime], uvicorn [runtime]\n\nDerived Facts: env_var: 18, database: 11, llm_provider: 7, ui_app: 2, ml: 1, route: 1, entry_point: 1\n\nTimeline Summary:\n- Total commits analyzed: 21 across 5 weeks\n- Full history complete: True\n- Biggest commit: 9cac962 by Harshini-noob (changed the groq model and added muti-provider)",
+        "Searched 51 files (path_glob: *.py)\nFound 10 matches for '@app.get':\nauth.py:10: def get_supabase(): (matched on word: get)\nauth.py:13: url = os.getenv(\"SUPABASE_URL\") (matched on word: get)\nauth.py:14: key = os.getenv(\"SUPABASE_KEY\") (matched on word: get)\nauth.py:28: get_supabase().table(\"api_keys\") (matched on word: get)\ncost_estimator.py:1: from model_registry import get_model_by_id (matched on word: get)\ncost_estimator.py:12: model_info = get_model_by_id(model) (matched on word: get)\ndashboard.py:10: supabase = create_client(os.getenv(\"SUPABASE_URL\"), os.getenv(\"SUPABASE_KEY\")) (matched on word: get)\ndashboard.py:32: req = row.get(\"requests\") or {} (matched on word: get)\ndashboard.py:33: scores = row.get(\"quality_scores\") or [] (matched on word: get)\ndashboard.py:36: rows.append({ (matched on word: app)",
+        "Searched 51 files (path_glob: *.py)\nFound 10 matches for 'app.':\ndashboard.py:36: rows.append({ (matched on word: app)\ndynamic_quality.py:49: scores.append(qs[\"score\"]) (matched on word: app)\nllm_cost_autopilot_client/models.py:55: lines.append(\"\\nCandidates considered:\") (matched on word: app)\nllm_cost_autopilot_client/models.py:57: lines.append(f\"  {c}\") (matched on word: app)\nllm_cost_autopilot_client/models.py:59: lines.append(\"\\nRejected:\") (matched on word: app)\nllm_cost_autopilot_client/models.py:61: lines.append(f\"  {r}\") (matched on word: app)\nlogger.py:29: - one or more model_calls rows (more than one only if escalation happened) (matched on word: app)\nmain.py:9: app = FastAPI() (matched on word: app)\nmain.py:31: @app.post(\"/query\")\nmain.py:52: model_calls_log.append({ (matched on word: app)",
+        "File: main.py (Lines 1-80 of 109)\n   1 | from fastapi import FastAPI, HTTPException, Depends\n   2 | from models import call_model\n   3 | from providers.groq_provider import GroqProvider\n   4 | from router import MAX_TOKENS_BY_TIER\n   5 | from logger import log_full_request\n   6 | from routing_policy import select_model, InvalidConstraintError, build_model_metadata\n   7 | from auth import verify_api_key\n   8 | \n   9 | app = FastAPI()\n  10 | \n  11 | QUALITY_PASS_THRESHOLD = 3\n  12 | _groq = GroqProvider()\n  13 | \n  14 | \n  15 | async def verify_quality(prompt: str, answer: str) -> dict:\n  16 |     judge_prompt = f\"\"\"Rate this answer's quality for the given question, 1-5.\n  17 | 1 = wrong or unhelpful, 5 = correct and complete.\n  18 | \n  19 | Question: \"{prompt}\"\n  20 | Answer: \"{answer}\"\n  21 | \n  22 | Respond with ONLY a number 1-5.\"\"\"\n  23 |     result = await _groq.generate(judge_prompt, model=\"openai/gpt-oss-120b\", max_tokens=60, temperature=0)\n  24 |     try:\n  25 |         score = int(\"\".join(filter(str.isdigit, result[\"answer\"].strip())))\n  26 |     except:\n  27 |         score = 5\n  28 |     return {\"score\": score, \"passed\": score >= QUALITY_PASS_THRESHOLD}\n  29 | \n  30 | \n  31 | @app.post(\"/query\")\n  32 | async def query(prompt: str, routing_mode: str = \"balanced\",\n  33 |                 max_cost_usd: float = None, min_quality: float = None,\n  34 |                 api_key_id: str = Depends(verify_api_key)):\n  35 | \n  36 |     try:\n  37 |         decision = await select_model(prompt, routing_mode=routing_mode,\n  38 |                                        max_cost_usd=max_cost_usd, min_quality=min_quality)\n  39 |     except InvalidConstraintError as e:\n  40 |         raise HTTPException(status_code=400, detail=str(e))\n  41 | \n  42 |     tier = decision[\"tier\"]\n  43 |     model = decision[\"model\"]\n  44 |     max_tokens = MAX_TOKENS_BY_TIER[tier]\n  45 |     spent_so_far = 0.0\n  46 |     model_calls_log = []\n  47 | \n  48 |     result = await call_model(prompt, mo",
+        "Searched 51 files (path_glob: *.py)\nFound 10 matches for '@app':\ndashboard.py:36: rows.append({ (matched on word: app)\ndynamic_quality.py:49: scores.append(qs[\"score\"]) (matched on word: app)\nllm_cost_autopilot_client/models.py:55: lines.append(\"\\nCandidates considered:\") (matched on word: app)\nllm_cost_autopilot_client/models.py:57: lines.append(f\"  {c}\") (matched on word: app)\nllm_cost_autopilot_client/models.py:59: lines.append(\"\\nRejected:\") (matched on word: app)\nllm_cost_autopilot_client/models.py:61: lines.append(f\"  {r}\") (matched on word: app)\nlogger.py:29: - one or more model_calls rows (more than one only if escalation happened) (matched on word: app)\nmain.py:9: app = FastAPI() (matched on word: app)\nmain.py:31: @app.post(\"/query\")\nmain.py:52: model_calls_log.append({ (matched on word: app)",
+        "(repeated call, returning the earlier result)\nSearched 51 files (path_glob: *.py)\nFound 10 matches for '@app.get':\nauth.py:10: def get_supabase(): (matched on word: get)\nauth.py:13: url = os.getenv(\"SUPABASE_URL\") (matched on word: get)\nauth.py:14: key = os.getenv(\"SUPABASE_KEY\") (matched on word: get)\nauth.py:28: get_supabase().table(\"api_keys\") (matched on word: get)\ncost_estimator.py:1: from model_registry import get_model_by_id (matched on word: get)\ncost_estimator.py:12: model_info = get_model_by_id(model) (matched on word: get)\ndashboard.py:10: supabase = create_client(os.getenv(\"SUPABASE_URL\"), os.getenv(\"SUPABASE_KEY\")) (matched on word: get)\ndashboard.py:32: req = row.get(\"requests\") or {} (matched on word: get)\ndashboard.py:33: scores = row.get(\"quality_scores\") or [] (matched on word: get)\ndashboard.py:36: rows.append({ (matched on word: app)",
+        "File: router.py (Lines 1-68 of 68)\n   1 | from providers.groq_provider import GroqProvider\n   2 | from models import call_model\n   3 | \n   4 | _groq = GroqProvider()\n   5 | \n   6 | MODEL_MAP = {\n   7 |     \"simple\": \"openai/gpt-oss-20b\",\n   8 |     \"medium\": \"openai/gpt-oss-120b\",\n   9 |     \"complex\": \"gemini-2.5-flash\"\n  10 | }\n  11 | \n  12 | MAX_TOKENS_BY_TIER = {\n  13 |     \"simple\": 250,\n  14 |     \"medium\": 600,\n  15 |     \"complex\":1200\n  16 | }\n  17 | \n  18 | NEXT_TIER = {\n  19 |     \"simple\": \"medium\",\n  20 |     \"medium\": \"complex\",\n  21 |     \"complex\": \"complex\"\n  22 | }\n  23 | \n  24 | \n  25 | def classify(prompt: str) -> str:\n  26 |     # unchanged — pure logic, no I/O, stays synchronous\n  27 |     prompt_lower = prompt.lower()\n  28 |     word_count = len(prompt.split())\n  29 |     hard_keywords = [\"design a\", \"architecture\", \"build a system\", \"implement a full\"]\n  30 |     medium_keywords = [\"explain\", \"analyze\", \"compare\", \"write code\", \"why\", \"how does\"]\n  31 |     if any(kw in prompt_lower for kw in hard_keywords):\n  32 |         return \"complex\"\n  33 |     if any(kw in prompt_lower for kw in medium_keywords):\n  34 |         return \"medium\"\n  35 |     if word_count < 15:\n  36 |         return \"simple\"\n  37 |     return \"medium\"\n  38 | \n  39 | \n  40 | async def classify_llm(prompt: str) -> str:\n  41 |     judge_prompt = f\"\"\"Rate this query's complexity as exactly one word: simple, medium, or complex.\n  42 | simple = factual lookup, definitions, short direct answers\n  43 | medium = explanations, comparisons, writing code, moderate reasoning\n  44 | complex = multi-step reasoning, system/architecture design, deep multi-part analysis\n  45 | Query: \"{prompt}\"\n  46 | Respond with only one word, nothing else.\"\"\"\n  47 |     result = await _groq.generate(judge_prompt, model=\"openai/gpt-oss-120b\", max_tokens=150,\n  48 |                                    temperature=0)\n  49 |     label = result[\"answer\"].strip().lower()\n  50 |     if label not in [\"simple\", \"m"
+      ],
+      "answer": "[Fact] The only FastAPI route defined in the repository is the POST endpoint `/query` found in `main.py` (line 31). No other `@app.get`, `@app.post`, or other HTTP method decorators are present in any `.py` file.",
+      "traces": [
+        {
+          "step": 1,
+          "thought_summary": null,
+          "tool": "get_overview",
+          "args": {
+            "include_tests": false
+          },
+          "result_preview": "Repository: Harshini-noob/llm-cost-copilot\nDescription: No description available\nDefault Branch: main\n\nLanguages: Python (51 files), Markdown (1 files), YAML (1 files), TOML (1 files)\n\nDependencies (13): google-genai (>=1.47.0) [runtime], groq [runtime], httpx (>=0.28.1) [runtime], pandas [runtime], python (3.11-slim) [base_image], python-dotenv [runtime], requests (>=2.28) [runtime], requests [runtime], sentence-transformers (>=5.1.2) [runtime], streamlit [runtime], supabase (>=2.31.0) [runtime], supabase [runtime], uvicorn [runtime]\n\nDerived Facts: env_var: 18, database: 11, llm_provider: 7, ui_app: 2, ml: 1, route: 1, entry_point: 1\n\nTimeline Summary:\n- Total commits analyzed: 21 across 5 weeks\n- Full history complete: True\n- Biggest commit: 9cac962 by Harshini-noob (changed the groq model and added muti-provider)",
+          "evidence_ids": [
+            "dep:google-genai",
+            "dep:groq",
+            "dep:httpx",
+            "dep:pandas",
+            "dep:python",
+            "dep:python-dotenv",
+            "dep:requests",
+            "dep:requests",
+            "dep:sentence-transformers",
+            "dep:streamlit",
+            "dep:supabase",
+            "dep:supabase",
+            "dep:uvicorn"
+          ],
+          "ms": 3473,
+          "tokens": 1383
+        },
+        {
+          "step": 2,
+          "thought_summary": null,
+          "tool": "search_code",
+          "args": {
+            "limit": 10,
+            "path_glob": "*.py",
+            "query": "@app.get"
+          },
+          "result_preview": "Searched 51 files (path_glob: *.py)\nFound 10 matches for '@app.get':\nauth.py:10: def get_supabase(): (matched on word: get)\nauth.py:13: url = os.getenv(\"SUPABASE_URL\") (matched on word: get)\nauth.py:14: key = os.getenv(\"SUPABASE_KEY\") (matched on word: get)\nauth.py:28: get_supabase().table(\"api_keys\") (matched on word: get)\ncost_estimator.py:1: from model_registry import get_model_by_id (matched on word: get)\ncost_estimator.py:12: model_info = get_model_by_id(model) (matched on word: get)\ndashboard.py:10: supabase = create_client(os.getenv(\"SUPABASE_URL\"), os.getenv(\"SUPABASE_KEY\")) (matched on word: get)\ndashboard.py:32: req = row.get(\"requests\") or {} (matched on word: get)\ndashboard.py:33: scores = row.get(\"quality_scores\") or [] (matched on word: get)\ndashboard.py:36: rows.append({ (matched on word: app)",
+          "evidence_ids": [
+            "file:auth.py#L10-10",
+            "file:auth.py#L13-13",
+            "file:auth.py#L14-14",
+            "file:auth.py#L28-28",
+            "file:cost_estimator.py#L1-1",
+            "file:cost_estimator.py#L12-12",
+            "file:dashboard.py#L10-10",
+            "file:dashboard.py#L32-32",
+            "file:dashboard.py#L33-33",
+            "file:dashboard.py#L36-36"
+          ],
+          "ms": 692,
+          "tokens": 1676
+        },
+        {
+          "step": 3,
+          "thought_summary": null,
+          "tool": "search_code",
+          "args": {
+            "limit": 10,
+            "path_glob": "*.py",
+            "query": "app."
+          },
+          "result_preview": "Searched 51 files (path_glob: *.py)\nFound 10 matches for 'app.':\ndashboard.py:36: rows.append({ (matched on word: app)\ndynamic_quality.py:49: scores.append(qs[\"score\"]) (matched on word: app)\nllm_cost_autopilot_client/models.py:55: lines.append(\"\\nCandidates considered:\") (matched on word: app)\nllm_cost_autopilot_client/models.py:57: lines.append(f\"  {c}\") (matched on word: app)\nllm_cost_autopilot_client/models.py:59: lines.append(\"\\nRejected:\") (matched on word: app)\nllm_cost_autopilot_client/models.py:61: lines.append(f\"  {r}\") (matched on word: app)\nlogger.py:29: - one or more model_calls rows (more than one only if escalation happened) (matched on word: app)\nmain.py:9: app = FastAPI() (matched on word: app)\nmain.py:31: @app.post(\"/query\")\nmain.py:52: model_calls_log.append({ (matched on word: app)",
+          "evidence_ids": [
+            "file:dashboard.py#L36-36",
+            "file:dynamic_quality.py#L49-49",
+            "file:llm_cost_autopilot_client/models.py#L55-55",
+            "file:llm_cost_autopilot_client/models.py#L57-57",
+            "file:llm_cost_autopilot_client/models.py#L59-59",
+            "file:llm_cost_autopilot_client/models.py#L61-61",
+            "file:logger.py#L29-29",
+            "file:main.py#L9-9",
+            "file:main.py#L31-31",
+            "file:main.py#L52-52"
+          ],
+          "ms": 9075,
+          "tokens": 1954
+        },
+        {
+          "step": 4,
+          "thought_summary": null,
+          "tool": "read_file",
+          "args": {
+            "end": 200,
+            "path": "main.py",
+            "start": 1
+          },
+          "result_preview": "File: main.py (Lines 1-80 of 109)\n   1 | from fastapi import FastAPI, HTTPException, Depends\n   2 | from models import call_model\n   3 | from providers.groq_provider import GroqProvider\n   4 | from router import MAX_TOKENS_BY_TIER\n   5 | from logger import log_full_request\n   6 | from routing_policy import select_model, InvalidConstraintError, build_model_metadata\n   7 | from auth import verify_api_key\n   8 | \n   9 | app = FastAPI()\n  10 | \n  11 | QUALITY_PASS_THRESHOLD = 3\n  12 | _groq = GroqProvider()\n  13 | \n  14 | \n  15 | async def verify_quality(prompt: str, answer: str) -> dict:\n  16 |     judge_prompt = f\"\"\"Rate this answer's quality for the given question, 1-5.\n  17 | 1 = wrong or unhelpful, 5 = correct and complete.\n  18 | \n  19 | Question: \"{prompt}\"\n  20 | Answer: \"{answer}\"\n  21 | \n  22 | Respond with ONLY a number 1-5.\"\"\"\n  23 |     result = await _groq.generate(judge_prompt, model=\"openai/gpt-oss-120b\", max_tokens=60, temperature=0)\n  24 |     try:\n  25 |         score = int(\"\".join(filter(str.isdigit, result[\"answer\"].strip())))\n  26 |     except:\n  27 |         score = 5\n  28 |     return {\"score\": score, \"passed\": score >= QUALITY_PASS_THRESHOLD}\n  29 | \n  30 | \n  31 | @app.post(\"/query\")\n  32 | async def query(prompt: str, routing_mode: str = \"balanced\",\n  33 |                 max_cost_usd: float = None, min_quality: float = None,\n  34 |                 api_key_id: str = Depends(verify_api_key)):\n  35 | \n  36 |     try:\n  37 |         decision = await select_model(prompt, routing_mode=routing_mode,\n  38 |                                        max_cost_usd=max_cost_usd, min_quality=min_quality)\n  39 |     except InvalidConstraintError as e:\n  40 |         raise HTTPException(status_code=400, detail=str(e))\n  41 | \n  42 |     tier = decision[\"tier\"]\n  43 |     model = decision[\"model\"]\n  44 |     max_tokens = MAX_TOKENS_BY_TIER[tier]\n  45 |     spent_so_far = 0.0\n  46 |     model_calls_log = []\n  47 | \n  48 |     result = await call_model(prompt, mo",
+          "evidence_ids": [
+            "file:main.py#L1-80"
+          ],
+          "ms": 12348,
+          "tokens": 2224
+        },
+        {
+          "step": 5,
+          "thought_summary": null,
+          "tool": "search_code",
+          "args": {
+            "limit": 10,
+            "path_glob": "*.py",
+            "query": "@app"
+          },
+          "result_preview": "Searched 51 files (path_glob: *.py)\nFound 10 matches for '@app':\ndashboard.py:36: rows.append({ (matched on word: app)\ndynamic_quality.py:49: scores.append(qs[\"score\"]) (matched on word: app)\nllm_cost_autopilot_client/models.py:55: lines.append(\"\\nCandidates considered:\") (matched on word: app)\nllm_cost_autopilot_client/models.py:57: lines.append(f\"  {c}\") (matched on word: app)\nllm_cost_autopilot_client/models.py:59: lines.append(\"\\nRejected:\") (matched on word: app)\nllm_cost_autopilot_client/models.py:61: lines.append(f\"  {r}\") (matched on word: app)\nlogger.py:29: - one or more model_calls rows (more than one only if escalation happened) (matched on word: app)\nmain.py:9: app = FastAPI() (matched on word: app)\nmain.py:31: @app.post(\"/query\")\nmain.py:52: model_calls_log.append({ (matched on word: app)",
+          "evidence_ids": [
+            "file:dashboard.py#L36-36",
+            "file:dynamic_quality.py#L49-49",
+            "file:llm_cost_autopilot_client/models.py#L55-55",
+            "file:llm_cost_autopilot_client/models.py#L57-57",
+            "file:llm_cost_autopilot_client/models.py#L59-59",
+            "file:llm_cost_autopilot_client/models.py#L61-61",
+            "file:logger.py#L29-29",
+            "file:main.py#L9-9",
+            "file:main.py#L31-31",
+            "file:main.py#L52-52"
+          ],
+          "ms": 18700,
+          "tokens": 2902
+        },
+        {
+          "step": 6,
+          "thought_summary": null,
+          "tool": "search_code",
+          "args": {
+            "limit": 10,
+            "path_glob": "*.py",
+            "query": "@app.get"
+          },
+          "result_preview": "(repeated call, returning the earlier result)\nSearched 51 files (path_glob: *.py)\nFound 10 matches for '@app.get':\nauth.py:10: def get_supabase(): (matched on word: get)\nauth.py:13: url = os.getenv(\"SUPABASE_URL\") (matched on word: get)\nauth.py:14: key = os.getenv(\"SUPABASE_KEY\") (matched on word: get)\nauth.py:28: get_supabase().table(\"api_keys\") (matched on word: get)\ncost_estimator.py:1: from model_registry import get_model_by_id (matched on word: get)\ncost_estimator.py:12: model_info = get_model_by_id(model) (matched on word: get)\ndashboard.py:10: supabase = create_client(os.getenv(\"SUPABASE_URL\"), os.getenv(\"SUPABASE_KEY\")) (matched on word: get)\ndashboard.py:32: req = row.get(\"requests\") or {} (matched on word: get)\ndashboard.py:33: scores = row.get(\"quality_scores\") or [] (matched on word: get)\ndashboard.py:36: rows.append({ (matched on word: app)",
+          "evidence_ids": [],
+          "ms": 20824,
+          "tokens": 3011
+        },
+        {
+          "step": 7,
+          "thought_summary": null,
+          "tool": "read_file",
+          "args": {
+            "end": 200,
+            "path": "router.py",
+            "start": 1
+          },
+          "result_preview": "File: router.py (Lines 1-68 of 68)\n   1 | from providers.groq_provider import GroqProvider\n   2 | from models import call_model\n   3 | \n   4 | _groq = GroqProvider()\n   5 | \n   6 | MODEL_MAP = {\n   7 |     \"simple\": \"openai/gpt-oss-20b\",\n   8 |     \"medium\": \"openai/gpt-oss-120b\",\n   9 |     \"complex\": \"gemini-2.5-flash\"\n  10 | }\n  11 | \n  12 | MAX_TOKENS_BY_TIER = {\n  13 |     \"simple\": 250,\n  14 |     \"medium\": 600,\n  15 |     \"complex\":1200\n  16 | }\n  17 | \n  18 | NEXT_TIER = {\n  19 |     \"simple\": \"medium\",\n  20 |     \"medium\": \"complex\",\n  21 |     \"complex\": \"complex\"\n  22 | }\n  23 | \n  24 | \n  25 | def classify(prompt: str) -> str:\n  26 |     # unchanged — pure logic, no I/O, stays synchronous\n  27 |     prompt_lower = prompt.lower()\n  28 |     word_count = len(prompt.split())\n  29 |     hard_keywords = [\"design a\", \"architecture\", \"build a system\", \"implement a full\"]\n  30 |     medium_keywords = [\"explain\", \"analyze\", \"compare\", \"write code\", \"why\", \"how does\"]\n  31 |     if any(kw in prompt_lower for kw in hard_keywords):\n  32 |         return \"complex\"\n  33 |     if any(kw in prompt_lower for kw in medium_keywords):\n  34 |         return \"medium\"\n  35 |     if word_count < 15:\n  36 |         return \"simple\"\n  37 |     return \"medium\"\n  38 | \n  39 | \n  40 | async def classify_llm(prompt: str) -> str:\n  41 |     judge_prompt = f\"\"\"Rate this query's complexity as exactly one word: simple, medium, or complex.\n  42 | simple = factual lookup, definitions, short direct answers\n  43 | medium = explanations, comparisons, writing code, moderate reasoning\n  44 | complex = multi-step reasoning, system/architecture design, deep multi-part analysis\n  45 | Query: \"{prompt}\"\n  46 | Respond with only one word, nothing else.\"\"\"\n  47 |     result = await _groq.generate(judge_prompt, model=\"openai/gpt-oss-120b\", max_tokens=150,\n  48 |                                    temperature=0)\n  49 |     label = result[\"answer\"].strip().lower()\n  50 |     if label not in [\"simple\", \"m",
+          "evidence_ids": [
+            "file:router.py#L1-68"
+          ],
+          "ms": 16164,
+          "tokens": 3191
+        }
+      ]
+    },
+    {
+      "id": "llm-providers",
+      "category": "facts",
+      "question": "Which LLM providers does the project support, and where are they implemented?",
+      "model": "openai/gpt-oss-20b",
+      "completed": false,
+      "stop_reason": "error",
+      "steps": 2,
+      "total_tokens": 3069,
+      "seconds": 1.5050419999970472,
+      "tool_recall": 1.0,
+      "tool_ok": true,
+      "unnecessary_calls": 1,
+      "evidence_hit": false,
+      "unverified_citations": 0,
+      "tagged": false,
+      "content_ok": false,
+      "no_bad_claim": true,
+      "false_abstention": false,
+      "fact_uncited": 0,
+      "tool_texts": [
+        "Repository: Harshini-noob/llm-cost-copilot\nDescription: No description available\nDefault Branch: main\n\nLanguages: Python (51 files), Markdown (1 files), YAML (1 files), TOML (1 files)\n\nDependencies (13): google-genai (>=1.47.0) [runtime], groq [runtime], httpx (>=0.28.1) [runtime], pandas [runtime], python (3.11-slim) [base_image], python-dotenv [runtime], requests (>=2.28) [runtime], requests [runtime], sentence-transformers (>=5.1.2) [runtime], streamlit [runtime], supabase (>=2.31.0) [runtime], supabase [runtime], uvicorn [runtime]\n\nDerived Facts: env_var: 18, database: 11, llm_provider: 7, ui_app: 2, ml: 1, route: 1, entry_point: 1\n\nTimeline Summary:\n- Total commits analyzed: 21 across 5 weeks\n- Full history complete: True\n- Biggest commit: 9cac962 by Harshini-noob (changed the groq model and added muti-provider)",
+        "41 llm_provider facts found (complete list from static analysis of the stored files; it detects Python decorator routes, Express routes, and import-based facts)\n- [database] supabase -> auth.py#L3 (matched_line=from supabase import create_client)\n- [database] supabase -> auth.py#L20 (matched_line=_supabase_client = create_client(url, key))\n- [database] supabase -> dashboard.py#L5 (matched_line=from supabase import create_client)\n- [database] supabase -> dashboard.py#L10 (matched_line=supabase = create_client(os.getenv(\"SUPABASE_URL\"), os.getenv(\"SUPABASE_KEY\")))\n- [database] supabase -> dynamic_quality.py#L3 (matched_line=from supabase import acreate_client, AsyncClient)\n- [database] supabase -> logger.py#L3 (matched_line=from supabase import create_client)\n- [database] supabase -> logger.py#L19 (matched_line=_supabase_client = create_client(url, key))\n- [database] supabase -> test_full_chain.py#L3 (matched_line=from supabase import create_client)\n- [database] supabase -> test_full_chain.py#L6 (matched_line=supabase = create_client(os.getenv(\"SUPABASE_URL\"), os.getenv(\"SUPABASE_KEY\")))\n- [database] supabase -> test_supabase.py#L3 (matched_line=from supabase import create_client)\n- [database] supabase -> test_supabase.py#L9 (matched_line=supabase = create_client(url, key))\n- [entry_point] main.py -> main.py#L1 (type=standard_filename)\n- [env_var] SUPABASE_KEY -> auth.py#L14 (variable_name=SUPABASE_KEY)\n- [env_var] SUPABASE_URL -> auth.py#L13 (variable_name=SUPABASE_URL)\n- [env_var] SUPABASE_KEY -> dashboard.py#L10 (variable_name=SUPABASE_KEY)\n- [env_var] SUPABASE_URL -> dashboard.py#L10 (variable_name=SUPABASE_URL)\n- [env_var] SUPABASE_KEY -> dynamic_quality.py#L13 (variable_name=SUPABASE_KEY)\n- [env_var] SUPABASE_URL -> dynamic_quality.py#L12 (variable_name=SUPABASE_URL)\n- [env_var] SUPABASE_KEY -> logger.py#L13 (variable_name=SUPABASE_KEY)\n- [env_var] SUPABASE_URL -> logger.py#L12 (variable_name=SUPABASE_URL)\n- [env_var] GEMINI_API_KEY -> providers/gemini_provider."
+      ],
+      "answer": "Daily token limit reached for model openai/gpt-oss-20b. Try again later or change LLM_MODEL.",
+      "traces": [
+        {
+          "step": 1,
+          "thought_summary": null,
+          "tool": "get_overview",
+          "args": {
+            "include_tests": false
+          },
+          "result_preview": "Repository: Harshini-noob/llm-cost-copilot\nDescription: No description available\nDefault Branch: main\n\nLanguages: Python (51 files), Markdown (1 files), YAML (1 files), TOML (1 files)\n\nDependencies (13): google-genai (>=1.47.0) [runtime], groq [runtime], httpx (>=0.28.1) [runtime], pandas [runtime], python (3.11-slim) [base_image], python-dotenv [runtime], requests (>=2.28) [runtime], requests [runtime], sentence-transformers (>=5.1.2) [runtime], streamlit [runtime], supabase (>=2.31.0) [runtime], supabase [runtime], uvicorn [runtime]\n\nDerived Facts: env_var: 18, database: 11, llm_provider: 7, ui_app: 2, ml: 1, route: 1, entry_point: 1\n\nTimeline Summary:\n- Total commits analyzed: 21 across 5 weeks\n- Full history complete: True\n- Biggest commit: 9cac962 by Harshini-noob (changed the groq model and added muti-provider)",
+          "evidence_ids": [
+            "dep:google-genai",
+            "dep:groq",
+            "dep:httpx",
+            "dep:pandas",
+            "dep:python",
+            "dep:python-dotenv",
+            "dep:requests",
+            "dep:requests",
+            "dep:sentence-transformers",
+            "dep:streamlit",
+            "dep:supabase",
+            "dep:supabase",
+            "dep:uvicorn"
+          ],
+          "ms": 754,
+          "tokens": 1393
+        },
+        {
+          "step": 2,
+          "thought_summary": null,
+          "tool": "get_facts",
+          "args": {
+            "kind": "llm_provider"
+          },
+          "result_preview": "41 llm_provider facts found (complete list from static analysis of the stored files; it detects Python decorator routes, Express routes, and import-based facts)\n- [database] supabase -> auth.py#L3 (matched_line=from supabase import create_client)\n- [database] supabase -> auth.py#L20 (matched_line=_supabase_client = create_client(url, key))\n- [database] supabase -> dashboard.py#L5 (matched_line=from supabase import create_client)\n- [database] supabase -> dashboard.py#L10 (matched_line=supabase = create_client(os.getenv(\"SUPABASE_URL\"), os.getenv(\"SUPABASE_KEY\")))\n- [database] supabase -> dynamic_quality.py#L3 (matched_line=from supabase import acreate_client, AsyncClient)\n- [database] supabase -> logger.py#L3 (matched_line=from supabase import create_client)\n- [database] supabase -> logger.py#L19 (matched_line=_supabase_client = create_client(url, key))\n- [database] supabase -> test_full_chain.py#L3 (matched_line=from supabase import create_client)\n- [database] supabase -> test_full_chain.py#L6 (matched_line=supabase = create_client(os.getenv(\"SUPABASE_URL\"), os.getenv(\"SUPABASE_KEY\")))\n- [database] supabase -> test_supabase.py#L3 (matched_line=from supabase import create_client)\n- [database] supabase -> test_supabase.py#L9 (matched_line=supabase = create_client(url, key))\n- [entry_point] main.py -> main.py#L1 (type=standard_filename)\n- [env_var] SUPABASE_KEY -> auth.py#L14 (variable_name=SUPABASE_KEY)\n- [env_var] SUPABASE_URL -> auth.py#L13 (variable_name=SUPABASE_URL)\n- [env_var] SUPABASE_KEY -> dashboard.py#L10 (variable_name=SUPABASE_KEY)\n- [env_var] SUPABASE_URL -> dashboard.py#L10 (variable_name=SUPABASE_URL)\n- [env_var] SUPABASE_KEY -> dynamic_quality.py#L13 (variable_name=SUPABASE_KEY)\n- [env_var] SUPABASE_URL -> dynamic_quality.py#L12 (variable_name=SUPABASE_URL)\n- [env_var] SUPABASE_KEY -> logger.py#L13 (variable_name=SUPABASE_KEY)\n- [env_var] SUPABASE_URL -> logger.py#L12 (variable_name=SUPABASE_URL)\n- [env_var] GEMINI_API_KEY -> providers/gemini_provider.",
+          "evidence_ids": [
+            "fact:database:supabase",
+            "file:auth.py#L3-3",
+            "fact:database:supabase",
+            "file:auth.py#L20-20",
+            "fact:database:supabase",
+            "file:dashboard.py#L5-5",
+            "fact:database:supabase",
+            "file:dashboard.py#L10-10",
+            "fact:database:supabase",
+            "file:dynamic_quality.py#L3-3",
+            "fact:database:supabase",
+            "file:logger.py#L3-3",
+            "fact:database:supabase",
+            "file:logger.py#L19-19",
+            "fact:database:supabase",
+            "file:test_full_chain.py#L3-3",
+            "fact:database:supabase",
+            "file:test_full_chain.py#L6-6",
+            "fact:database:supabase",
+            "file:test_supabase.py#L3-3",
+            "fact:database:supabase",
+            "file:test_supabase.py#L9-9",
+            "fact:entry_point:main.py",
+            "file:main.py#L1-1",
+            "fact:env_var:SUPABASE_KEY",
+            "file:auth.py#L14-14",
+            "fact:env_var:SUPABASE_URL",
+            "file:auth.py#L13-13",
+            "fact:env_var:SUPABASE_KEY",
+            "file:dashboard.py#L10-10"
+          ],
+          "ms": 398,
+          "tokens": 1676
+        }
+      ]
+    },
+    {
+      "id": "commit-logger-replaced",
+      "category": "history",
+      "question": "What did commit 02a5c7b change in logger.py, and what did the telemetry logger use before Supabase?",
+      "model": "openai/gpt-oss-20b",
+      "completed": false,
+      "stop_reason": "error",
+      "steps": 0,
+      "total_tokens": 0,
+      "seconds": 0.23147500000050059,
+      "tool_recall": 0.0,
+      "tool_ok": false,
+      "unnecessary_calls": 0,
+      "evidence_hit": false,
+      "unverified_citations": 0,
+      "tagged": false,
+      "content_ok": false,
+      "no_bad_claim": true,
+      "false_abstention": false,
+      "fact_uncited": 0,
+      "tool_texts": [],
+      "answer": "Daily token limit reached for model openai/gpt-oss-20b. Try again later or change LLM_MODEL.",
+      "traces": []
+    }
+  ]
+}
