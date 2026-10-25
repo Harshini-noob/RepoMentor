@@ -2,7 +2,10 @@
 
 Run from the backend folder:
   python -m app.dossier.agent_sections <project_id> [--only components,features,decisions]
-         [--commits 02a5c7b,9cac962] [--max-tokens 45000] [--force]
+         [--commits 02a5c7b,9cac962] [--max-tokens 45000] [--force] [--reparse]
+
+--reparse re-reads the answers of earlier saved runs (agent_traces) and parses them again.
+It makes no LLM calls and costs no tokens.
 """
 
 import argparse
@@ -17,16 +20,17 @@ from app.dossier.schema import Claim, Dossier
 
 FORMAT = (
     "Answer format: 2 to 8 lines, ONE claim per line, each line exactly like "
-    "'[Fact] claim text [evidence IDs]'. Tags: [Fact] a tool result shows it, "
-    "[Inferred] reasoned from observations, [Uncertain] not supported. "
-    "No headings, no code blocks, no extra text. Cite IDs exactly as tools returned them."
+    "'[Fact] claim text [file:main.py#L31]'. Tags: [Fact] a tool result shows it, "
+    "[Inferred] reasoned from observations, [Uncertain] not supported. Use plain ASCII square "
+    "brackets for evidence IDs and write file IDs as file:<path>#L<start>-<end>. "
+    "No headings, no code blocks, no extra text."
 )
 
 SECTION_GOALS = {
     "components": (
-        "Describe the main components of this project. For the 5 to 8 most important source "
+        "Describe the main components of this project. For the 6 to 8 most important source "
         "files or folders, say what each is responsible for and what it depends on. Start with "
-        "get_overview and get_facts, then read only the files you need."
+        "get_overview and get_facts, then read only the files you need. Do not only list imports."
     ),
     "features": (
         "List the main features this project offers to its users. Use the README and the code. "
@@ -51,6 +55,25 @@ PURPOSE_RE = re.compile(
     r"\b(to prevent|to avoid|in order to|so that|because|to ensure|likely)\b", re.IGNORECASE
 )
 STRUCTURAL = ("migrat", "replac", "refactor", "rewrite", "switch")
+
+# Models sometimes use full-width brackets and typographic dashes; map them to ASCII.
+CHAR_MAP = str.maketrans({
+    "\u3010": "[", "\u3011": "]", "\u3014": "[", "\u3015": "]", "\uff3b": "[", "\uff3d": "]",
+    "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-",
+})
+BARE_REF_RE = re.compile(
+    r"(?<![\w:/.\-])([A-Za-z0-9_][\w./\-]*\.[A-Za-z0-9]{1,5})#L?(\d+)(?:-L?(\d+))?"
+)
+
+
+def normalize(text: str) -> str:
+    """ASCII brackets and dashes; turn bare 'file.py#L10-20' into 'file:file.py#L10-20'."""
+    text = text.translate(CHAR_MAP)
+
+    def to_id(m: re.Match) -> str:
+        return f"file:{m.group(1)}#L{m.group(2)}" + (f"-{m.group(3)}" if m.group(3) else "")
+
+    return BARE_REF_RE.sub(to_id, text)
 
 
 def _first_line(commit: dict) -> str:
@@ -77,7 +100,7 @@ async def candidate_commits(db, project_id: str, n: int = 7) -> list[dict]:
 def parse_claims(answer: str, collected: set[str], extra: dict | None = None) -> tuple[list[Claim], dict]:
     claims: list[Claim] = []
     stats = {"parsed": 0, "downgraded": 0, "dropped_ids": 0}
-    for line in answer.splitlines():
+    for line in normalize(answer).splitlines():
         m = LINE_RE.match(line)
         if not m:
             continue
@@ -93,6 +116,7 @@ def parse_claims(answer: str, collected: set[str], extra: dict | None = None) ->
             text = text.replace(c, "")
         text = re.sub(r"\[\s*evidence[s]?\s*:?\s*[,;\s]*\]", "", text, flags=re.IGNORECASE)
         text = re.sub(r"\[[\s,;:]*\]", "", text)
+        text = re.sub(r"\(\s*[,;]*\s*\)", "", text)
         text = re.sub(r"\s+([,.;])", r"\1", text)
         text = re.sub(r"\s{2,}", " ", text).strip(" ,;")
         if not text:
@@ -129,6 +153,19 @@ async def load_or_build(project_id: str, db) -> Dossier:
     return await build_static_dossier(project_id, db)
 
 
+async def latest_answer(db, project_id: str, goal_prefix: str):
+    """Final answer and collected evidence of the newest saved run whose goal starts with the prefix."""
+    doc = await db.agent_traces.find_one(
+        {"project_id": project_id, "stop_reason": "answered",
+         "goal": {"$regex": "^" + re.escape(goal_prefix)}},
+        sort=[("_id", -1)],
+    )
+    if not doc:
+        return None, set()
+    collected = {eid for s in doc.get("steps", []) for eid in (s.get("evidence_ids") or [])}
+    return doc.get("final_answer") or "", collected
+
+
 async def investigate(goal: str, project_id: str, db, max_steps: int):
     return await run_agent(
         goal=goal + "\n\n" + FORMAT,
@@ -148,24 +185,33 @@ def report(claims: list[Claim], stats: dict, tokens: int) -> None:
         print(f"       evidence: {', '.join(c.evidence) or '-'}")
 
 
-async def build_simple_section(dossier: Dossier, db, project_id: str, name: str) -> Dossier:
-    run = await investigate(SECTION_GOALS[name], project_id, db, 10)
-    if run.stop_reason != "answered":
-        print(f"  skipped: stop_reason={run.stop_reason}: {(run.final_answer or '')[:200]}")
-        return dossier
-    collected = {eid for step in run.steps for eid in step.evidence_ids}
-    claims, stats = parse_claims(run.final_answer or "", collected)
+async def build_simple_section(dossier: Dossier, db, project_id: str, name: str, reparse: bool) -> Dossier:
+    if reparse:
+        answer, collected = await latest_answer(db, project_id, SECTION_GOALS[name][:60])
+        if answer is None:
+            print("  no stored run found; run once without --reparse")
+            return dossier
+        tokens = 0
+    else:
+        run = await investigate(SECTION_GOALS[name], project_id, db, 10)
+        if run.stop_reason != "answered":
+            print(f"  skipped: stop_reason={run.stop_reason}: {(run.final_answer or '')[:200]}")
+            return dossier
+        answer = run.final_answer or ""
+        collected = {eid for step in run.steps for eid in step.evidence_ids}
+        tokens = run.total_tokens
+    claims, stats = parse_claims(answer, collected)
     if not claims:
         print("  skipped: no '[Tag] claim' lines found in the answer")
         return dossier
     dossier.sections[name] = [c for c in dossier.sections.get(name, []) if c.source != "agent"] + claims
     dossier = await save_dossier(db, dossier)
-    report(claims, stats, run.total_tokens)
+    report(claims, stats, tokens)
     return dossier
 
 
 async def build_decisions(dossier: Dossier, db, project_id: str, commits_arg: str,
-                          max_tokens: int, force: bool) -> Dossier:
+                          max_tokens: int, force: bool, reparse: bool) -> Dossier:
     if commits_arg:
         commits = []
         for prefix in [p.strip() for p in commits_arg.split(",") if p.strip()]:
@@ -185,27 +231,35 @@ async def build_decisions(dossier: Dossier, db, project_id: str, commits_arg: st
     spent = 0
     for i, c in enumerate(commits):
         sha7 = c["sha"][:7]
-        if sha7 in done and not force:
+        if not reparse and sha7 in done and not force:
             print(f"\n--- {sha7}: already in the dossier, skipped (use --force to redo)")
             continue
-        if spent >= max_tokens:
+        if not reparse and spent >= max_tokens:
             print(f"\nToken cap reached ({spent}). Run the same command again to continue.")
             break
         print(f"\n--- commit {sha7}: {_first_line(c)[:70]}", flush=True)
-        goal = DECISION_GOAL.format(
-            sha7=sha7, date=str(c.get("date"))[:10], add=c.get("additions") or 0,
-            dele=c.get("deletions") or 0, message=_first_line(c)[:160],
-        )
-        run = await investigate(goal, project_id, db, 7)
-        spent += run.total_tokens
-        answer = run.final_answer or ""
-        if run.stop_reason != "answered":
-            print(f"  skipped: stop_reason={run.stop_reason}: {answer[:200]}")
-            if "daily" in answer.lower():
-                print("  Daily limit reached. Try again later or change LLM_MODEL.")
-                break
-            continue
-        collected = {eid for step in run.steps for eid in step.evidence_ids}
+        if reparse:
+            answer, collected = await latest_answer(db, project_id, f"Commit {sha7} (")
+            if answer is None:
+                print("  no stored run for this commit, skipped")
+                continue
+            tokens = 0
+        else:
+            goal = DECISION_GOAL.format(
+                sha7=sha7, date=str(c.get("date"))[:10], add=c.get("additions") or 0,
+                dele=c.get("deletions") or 0, message=_first_line(c)[:160],
+            )
+            run = await investigate(goal, project_id, db, 7)
+            spent += run.total_tokens
+            answer = run.final_answer or ""
+            if run.stop_reason != "answered":
+                print(f"  skipped: stop_reason={run.stop_reason}: {answer[:200]}")
+                if "daily" in answer.lower():
+                    print("  Daily limit reached. Try again later or change LLM_MODEL.")
+                    break
+                continue
+            collected = {eid for step in run.steps for eid in step.evidence_ids}
+            tokens = run.total_tokens
         claims, stats = parse_claims(answer, collected, {"commit": sha7})
         if not claims:
             print("  skipped: no '[Tag] claim' lines found in the answer")
@@ -216,21 +270,21 @@ async def build_decisions(dossier: Dossier, db, project_id: str, commits_arg: st
             if not (x.source == "agent" and x.details.get("commit") in (sha7, None))
         ] + claims
         dossier = await save_dossier(db, dossier)
-        report(claims, stats, run.total_tokens)
-        if i < len(commits) - 1:
+        report(claims, stats, tokens)
+        if not reparse and i < len(commits) - 1:
             await asyncio.sleep(25)  # let the per-minute token window recover
     return dossier
 
 
 async def main_async(project_id: str, db, only: list[str], commits_arg: str,
-                     max_tokens: int, force: bool) -> None:
+                     max_tokens: int, force: bool, reparse: bool) -> None:
     dossier = await load_or_build(project_id, db)
     for name in only:
         print(f"\n=== {name} ===", flush=True)
         if name == "decisions":
-            dossier = await build_decisions(dossier, db, project_id, commits_arg, max_tokens, force)
+            dossier = await build_decisions(dossier, db, project_id, commits_arg, max_tokens, force, reparse)
         else:
-            dossier = await build_simple_section(dossier, db, project_id, name)
+            dossier = await build_simple_section(dossier, db, project_id, name, reparse)
 
 
 if __name__ == "__main__":
@@ -240,8 +294,10 @@ if __name__ == "__main__":
     parser.add_argument("--commits", default="")
     parser.add_argument("--max-tokens", type=int, default=45000)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--reparse", action="store_true")
     args = parser.parse_args()
     names = [n.strip() for n in args.only.split(",") if n.strip() in (*SECTION_GOALS, "decisions")]
     if not names:
         raise SystemExit("--only must contain some of: components, features, decisions")
-    asyncio.run(main_async(args.project_id, get_db(), names, args.commits, args.max_tokens, args.force))
+    asyncio.run(main_async(args.project_id, get_db(), names, args.commits, args.max_tokens,
+                           args.force, args.reparse))
