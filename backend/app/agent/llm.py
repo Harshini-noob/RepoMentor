@@ -33,7 +33,7 @@ from app.core.logging import redact
 logger = logging.getLogger("repomentor.agent.llm")
 
 REQUEST_TIMEOUT_S = 60.0
-MAX_TOTAL_BACKOFF_S = 45.0
+MAX_TOTAL_BACKOFF_S = 75.0
 MAX_TRANSIENT_RETRIES = 2
 
 

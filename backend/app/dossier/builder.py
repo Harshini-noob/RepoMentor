@@ -223,6 +223,16 @@ async def save_dossier(db, dossier: Dossier) -> Dossier:
     return dossier
 
 
+async def rebuild_static(db, project_id: str) -> Dossier:
+    """Rebuild the static claims but keep claims written by the agent or the user."""
+    new = await build_static_dossier(project_id, db)
+    old = await db.dossiers.find_one({"project_id": project_id}, {"_id": 0})
+    if old:
+        for name, claims in (old.get("sections") or {}).items():
+            kept = [Claim.model_validate(c) for c in claims if c.get("source") != "static"]
+            new.sections.setdefault(name, []).extend(kept)
+    return new
+
 async def _main(project_id: str) -> None:
     db = get_db()
     dossier = await save_dossier(db, await build_static_dossier(project_id, db))
