@@ -1,0 +1,46 @@
+{
+  "replace": [
+    {
+      "section": "decisions",
+      "match": "synchronous OpenAI client call",
+      "text": "The commit made verify_quality an async function and replaced its synchronous Groq client call (model openai/gpt-oss-120b, max_tokens 5) with an awaited GroqProvider.generate call (max_tokens 60) in main.py, removing the client import and adding a GroqProvider instance"
+    },
+    {
+      "section": "decisions",
+      "match": "new ones for OpenAI models",
+      "text": "The fallback model mapping in models.py changed from llama-3.3-70b-versatile -> openai/gpt-oss-120b -> llama-3.1-8b-instant to openai/gpt-oss-120b -> openai/gpt-oss-20b. These are Groq-hosted models, the project has no OpenAI provider"
+    }
+  ],
+  "add": [
+    {
+      "section": "decisions", "tag": "fact", "commit": "9cac962",
+      "text": "A code comment in models.py says fallback applies only within Groq because Gemini's free tier is not rate-limit-fragile in the same way, and cross-provider fallback would need its own design",
+      "evidence": ["commit:9cac962:models.py"]
+    },
+    {
+      "section": "decisions", "tag": "fact", "commit": "9cac962",
+      "text": "The _raw_call docstring in models.py says cost is computed from registry pricing in one place instead of inside each provider, so pricing logic is not duplicated per provider",
+      "evidence": ["commit:9cac962:models.py"]
+    },
+    {
+      "section": "decisions", "tag": "fact", "commit": "21efdc6",
+      "text": "In main.py the quality-judge call changed from max_tokens 5 to max_tokens 60",
+      "evidence": ["commit:21efdc6:main.py"]
+    },
+    {
+      "section": "decisions", "tag": "inferred", "commit": "21efdc6",
+      "text": "The judge max_tokens increase matches the token budget adjustments named in the commit message",
+      "evidence": ["commit:21efdc6:main.py"]
+    },
+    {
+      "section": "decisions", "tag": "fact", "commit": "21efdc6",
+      "text": "In main.py select_model, call_model, verify_quality and build_model_metadata are now awaited",
+      "evidence": ["commit:21efdc6:main.py"]
+    },
+    {
+      "section": "decisions", "tag": "fact", "commit": "21efdc6",
+      "text": "In main.py the response no longer includes candidates_considered",
+      "evidence": ["commit:21efdc6:main.py"]
+    }
+  ]
+}

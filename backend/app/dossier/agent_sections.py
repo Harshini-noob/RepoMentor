@@ -97,7 +97,12 @@ async def candidate_commits(db, project_id: str, n: int = 7) -> list[dict]:
     return sorted(chosen.values(), key=lambda c: str(c.get("date")))
 
 
-def parse_claims(answer: str, collected: set[str], extra: dict | None = None) -> tuple[list[Claim], dict]:
+def parse_claims(
+    answer: str,
+    collected: set[str],
+    extra: dict | None = None,
+    fallback: list[str] | None = None,
+) -> tuple[list[Claim], dict]:
     claims: list[Claim] = []
     stats = {"parsed": 0, "downgraded": 0, "dropped_ids": 0}
     for line in normalize(answer).splitlines():
@@ -124,10 +129,15 @@ def parse_claims(answer: str, collected: set[str], extra: dict | None = None) ->
 
         confidence = {"fact": 1.0, "inferred": 0.7, "uncertain": 0.3}[tag]
         details: dict = dict(extra or {})
+        if bad:
+            details["dropped_ids"] = sorted(bad)
         if tag == "fact" and PURPOSE_RE.search(text):
             tag, confidence = "inferred", 0.6
             details["downgraded"] = "purpose clause inside a fact"
             stats["downgraded"] += 1
+        if tag in ("fact", "inferred") and not good and fallback:
+            good = list(fallback)
+            details["evidence_level"] = "commit only (no line-level citation survived)"
         if tag == "fact" and not good:
             tag, confidence = "inferred", 0.5
             details["downgraded"] = "fact had no supported evidence"
@@ -183,13 +193,15 @@ def report(claims: list[Claim], stats: dict, tokens: int) -> None:
     for c in claims:
         print(f"   [{c.tag}] {c.claim}")
         print(f"       evidence: {', '.join(c.evidence) or '-'}")
+        if c.details.get("dropped_ids"):
+            print(f"       rejected ids: {', '.join(c.details['dropped_ids'])}")
 
 
 async def build_simple_section(dossier: Dossier, db, project_id: str, name: str, reparse: bool) -> Dossier:
     if reparse:
         answer, collected = await latest_answer(db, project_id, SECTION_GOALS[name][:60])
         if answer is None:
-            print("  no stored run found; run once without --reparse")
+            print("  no stored run for this commit, skipped")
             return dossier
         tokens = 0
     else:
@@ -260,7 +272,8 @@ async def build_decisions(dossier: Dossier, db, project_id: str, commits_arg: st
                 continue
             collected = {eid for step in run.steps for eid in step.evidence_ids}
             tokens = run.total_tokens
-        claims, stats = parse_claims(answer, collected, {"commit": sha7})
+        fallback = [f"commit:{sha7}"] if f"commit:{sha7}" in collected else None
+        claims, stats = parse_claims(answer, collected, {"commit": sha7}, fallback=fallback)
         if not claims:
             print("  skipped: no '[Tag] claim' lines found in the answer")
             continue
