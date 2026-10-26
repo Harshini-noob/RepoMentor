@@ -16,6 +16,7 @@ from app.agent.tools.registry import MAX_OUTPUT_CHARS, ToolRegistry
 from app.agent.tools import (
     build_registry,
     OverviewTool,
+    DossierTool,
     ListTreeTool,
     ReadFileTool,
     SearchCodeTool,
@@ -28,6 +29,8 @@ from app.agent.tools import (
     SearchPRsTool,
     GetPRTool,
 )
+from app.agent.loop import run_agent
+from app.agent.state import LLMReply, ToolCall
 from app.agent.tools.search_code import matches_glob
 from app.github.client import GitHubClient
 import httpx
@@ -315,6 +318,115 @@ async def test_get_overview_tool(mock_db: AsyncIOMotorDatabase) -> None:
     out_tests = await tool.run(seeded_project, tool.args_schema(include_tests=True))
     assert "route: 1" in out_tests.text
     assert "test: 1" in out_tests.text
+
+
+@pytest.mark.asyncio
+async def test_get_overview_mentions_saved_dossier(mock_db: AsyncIOMotorDatabase) -> None:
+    project_id = await seed_project_data(mock_db)
+    await mock_db.dossiers.insert_one({"project_id": project_id, "version": 1, "sections": {}})
+
+    out = await OverviewTool(db=mock_db).run(project_id, OverviewTool.args_schema())
+
+    assert "Dossier: call get_dossier() for the saved project understanding." in out.text
+
+
+@pytest.mark.asyncio
+async def test_get_dossier_summary_and_section_claims(mock_db: AsyncIOMotorDatabase) -> None:
+    project_id = await seed_project_data(mock_db)
+    await mock_db.dossiers.insert_one({
+        "project_id": project_id,
+        "version": 4,
+        "generated_from_sha": "abc123456789",
+        "sections": {
+            "components": [
+                {
+                    "claim": "Router handles requests",
+                    "tag": "fact",
+                    "evidence": ["file:src/router.py#L1-2", "dep:fastapi", "fact:route:GET", "file:path with spaces#L1"],
+                    "source": "user",
+                    "details": {"commit": "abc123456789"},
+                }
+            ],
+            "features": [{"claim": "Search feature", "tag": "inferred", "evidence": [], "source": "agent"}],
+        },
+    })
+
+    tool = DossierTool(db=mock_db)
+    summary = await tool.run(project_id, tool.args_schema())
+    assert "Dossier version: 4" in summary.text
+    assert "Built from commit: abc123456789" in summary.text
+    assert "- components: 1 claims" in summary.text
+    assert "- features: 1 claims" in summary.text
+    assert "Call get_dossier(section=<name>) for the claims." in summary.text
+
+    section = await tool.run(project_id, tool.args_schema(section="components"))
+    assert "[Fact] Router handles requests [file:src/router.py#L1-2, dep:fastapi, fact:route:GET]" in section.text
+    assert "file:path with spaces#L1" not in section.text
+    assert "(commit abc1234) (verified by the project owner)" in section.text
+    assert section.evidence_ids == [
+        "file:src/router.py#L1-2",
+        "dep:fastapi",
+        "fact:route:GET",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_dossier_missing_message(mock_db: AsyncIOMotorDatabase) -> None:
+    output = await DossierTool(db=mock_db).run("missing", DossierTool.args_schema())
+
+    assert output.text == "No dossier saved for this project. Use the other tools."
+
+
+@pytest.mark.asyncio
+async def test_get_dossier_registered_and_run_evidence_collected(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    project_id = await seed_project_data(mock_db)
+    await mock_db.dossiers.insert_one({
+        "project_id": project_id,
+        "version": 1,
+        "sections": {
+            "components": [{
+                "claim": "Router handles requests",
+                "tag": "fact",
+                "evidence": ["file:src/router.py#L1-2"],
+                "source": "agent",
+                "details": {},
+            }]
+        },
+    })
+    registry = build_registry(db=mock_db)
+    schemas = registry.schemas()
+    assert "get_dossier" in {schema["function"]["name"] for schema in schemas}
+
+    calls = 0
+
+    async def scripted_chat(messages, tools=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return LLMReply(
+                content="Reading the saved project understanding.",
+                tool_calls=[ToolCall(id="dossier-1", name="get_dossier", arguments={"section": "components"})],
+            )
+        return LLMReply(
+            content="[Fact] Router handles requests [file:src/router.py#L1-2]",
+            tool_calls=[],
+        )
+
+    run = await run_agent(
+        goal="What are the components?",
+        project_id=project_id,
+        max_steps=3,
+        db=mock_db,
+        chat_fn=scripted_chat,
+    )
+
+    assert run.stop_reason == "answered"
+    assert any(step.tool == "get_dossier" for step in run.steps)
+    assert "file:src/router.py#L1-2" in {
+        evidence_id for step in run.steps for evidence_id in step.evidence_ids
+    }
 
 
 @pytest.mark.asyncio
@@ -806,7 +918,7 @@ async def test_build_registry_with_mock_db(mock_db: AsyncIOMotorDatabase) -> Non
     seeded_project = await seed_project_data(mock_db)
     reg = build_registry(db=mock_db)
     schemas = reg.schemas()
-    assert len(schemas) == 12
+    assert len(schemas) == 13
     tool_names = {s["function"]["name"] for s in schemas}
     expected = {
         "get_overview",
@@ -815,6 +927,7 @@ async def test_build_registry_with_mock_db(mock_db: AsyncIOMotorDatabase) -> Non
         "search_code",
         "get_dependencies",
         "get_facts",
+        "get_dossier",
         "get_timeline",
         "search_commits",
         "file_history",

@@ -1,15 +1,29 @@
 import re
 
+ANSWER_CHAR_MAP = str.maketrans({
+    "\u3010": "[",
+    "\u3011": "]",
+    "\u3014": "[",
+    "\u3015": "]",
+    "\uff3b": "[",
+    "\uff3d": "]",
+    "\u2010": "-",
+    "\u2011": "-",
+    "\u2012": "-",
+    "\u2013": "-",
+    "\u2014": "-",
+})
+
 # Matches ids as tools emit them, plus the "#L10-L20" variant models like to write.
 CITE_RE = re.compile(
-    r"(?:file:[^\s\]\)#,]+#L\d+(?:-L?\d+)?"
-    r"|commit:[0-9a-fA-F]{7,40}:[^\s\]\)#,]+"
+    r"(?:file:[^\s\]\)\u3011#,]+#L\d+(?:-L?\d+)?"
+    r"|commit:[0-9a-fA-F]{7,40}:[^\s\]\)\u3011#,]+"
     r"|commit:[0-9a-fA-F]{7,40}"
     r"|pr:\d+"
-    r"|dep:[^\s\]\),]+"
-    r"|fact:[a-z_]+:[^\s\]\),]+"
-    r"|overview:[^\s\]\),]+)"
-    r"(?![^\s\]\)#,.;:])"
+    r"|dep:[^\s\]\)\u3011,]+"
+    r"|fact:[a-z_]+:[^\s\]\)\u3011,]+"
+    r"|overview:[^\s\]\)\u3011,]+)"
+    r"(?![^\s\]\)\u3011#,.;:])"
 )
 EVIDENCE_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:file|commit|pr|dep|fact):[^\s\]\),]*"
@@ -56,6 +70,7 @@ def _covered(evidence_ids):
 
 def find_unsupported_citations(answer: str, evidence_ids) -> list[str]:
     """Return citations in the answer that no tool result in this run backs up."""
+    answer = answer.translate(ANSWER_CHAR_MAP)
     lines, others, commits = _covered(evidence_ids)
     bad: list[str] = []
     for raw in dict.fromkeys(CITE_RE.findall(answer)):
@@ -128,6 +143,7 @@ def find_uncited_facts(answer: str) -> list[str]:
 
 def find_unverified_quotes(answer: str, tool_texts, evidence_ids=()) -> list[str]:
     """Return code lines and quoted spans not found in tool output."""
+    answer = answer.translate(ANSWER_CHAR_MAP)
     normalised_results = []
     for text in tool_texts:
         cleaned_lines = []

@@ -50,6 +50,12 @@ def test_commit_path_citation_is_validated_against_collected_ids() -> None:
     assert check(f"Changed in {citation}.", {"commit:a1b2c3d"}) == [citation]
 
 
+def test_full_width_commit_path_citation_is_normalized() -> None:
+    citation = "commit:abc1234:main.py"
+    assert check("【commit:abc1234:main.py】", {citation}) == []
+    assert check("【commit:abc1234:main.py】", set()) == [citation]
+
+
 def test_count_tags_is_case_insensitive() -> None:
     assert count_tags("[fact] [INFERRED] [Uncertain] [Fact]") == {
         "Fact": 2,

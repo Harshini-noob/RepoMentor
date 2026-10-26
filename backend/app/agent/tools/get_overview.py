@@ -102,6 +102,8 @@ class OverviewTool(Tool):
             "Timeline Summary:",
             *[f"- {item}" for item in timeline_info],
         ])
+        if await db.dossiers.find_one({"project_id": project_id}, {"_id": 1}):
+            lines.append("Dossier: call get_dossier() for the saved project understanding.")
 
         return ToolOutput(
             text="\n".join(lines),

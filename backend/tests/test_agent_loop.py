@@ -66,6 +66,26 @@ async def test_agent_answers_immediately(mock_db: AsyncIOMotorDatabase) -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_normalizes_full_width_brackets_in_final_answer(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    async def fake_chat(messages, tools=None):
+        return LLMReply(content="【Uncertain】 Not supported.", tool_calls=[])
+
+    run = await run_agent(
+        goal="Normalize final answer",
+        project_id="proj_full_width_answer",
+        max_steps=2,
+        db=mock_db,
+        chat_fn=fake_chat,
+    )
+
+    assert run.final_answer == "[Uncertain] Not supported."
+    trace_doc = await mock_db.agent_traces.find_one({"project_id": "proj_full_width_answer"})
+    assert trace_doc["final_answer"] == "[Uncertain] Not supported."
+
+
+@pytest.mark.asyncio
 async def test_malformed_citation_is_added_to_unverified_note(
     mock_db: AsyncIOMotorDatabase,
 ) -> None:

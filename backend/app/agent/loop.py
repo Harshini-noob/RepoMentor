@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.agent.evidence import (
+    ANSWER_CHAR_MAP,
     count_tags,
     find_uncited_facts,
     find_unsupported_citations,
@@ -244,6 +245,7 @@ async def run_agent(
 
             # If no tool calls produced, model delivered final answer
             if not reply.tool_calls:
+                answer = (reply.content or "").translate(ANSWER_CHAR_MAP)
                 history_was_checked = any(step.tool in HISTORY_TOOLS for step in steps)
                 if (
                     is_why_question(goal)
@@ -254,7 +256,7 @@ async def run_agent(
                 ):
                     history_nudge_sent = True
                     policy_nudge_count += 1
-                    messages.append({"role": "assistant", "content": reply.content or ""})
+                    messages.append({"role": "assistant", "content": answer})
                     messages.append({
                         "role": "user",
                         "content": (
@@ -281,13 +283,13 @@ async def run_agent(
                     continue
                 if (
                     not tag_nudge_sent
-                    and not any(count_tags(reply.content or "").values())
+                    and not any(count_tags(answer).values())
                     and policy_nudge_count < 3
                     and step_idx < max_steps
                 ):
                     tag_nudge_sent = True
                     policy_nudge_count += 1
-                    messages.append({"role": "assistant", "content": reply.content or ""})
+                    messages.append({"role": "assistant", "content": answer})
                     messages.append({
                         "role": "user",
                         "content": (
@@ -299,7 +301,7 @@ async def run_agent(
                     restore_pinned_for_next_call = True
                     nudge_step = TraceStep(
                         step=step_idx,
-                        thought_summary=reply.content[:160] if reply.content else None,
+                        thought_summary=answer[:160] if answer else None,
                         tool="policy_nudge",
                         args={},
                         result_preview="Requested claim tags for the final answer.",
@@ -311,7 +313,6 @@ async def run_agent(
                     _notify(on_step, nudge_step)
                     step_idx -= 1
                     continue
-                answer = reply.content or ""
                 collected = {eid for step in steps for eid in step.evidence_ids}
                 unsupported = find_unsupported_citations(answer, collected)
                 unverified_quotes = find_unverified_quotes(
@@ -443,7 +444,7 @@ async def run_agent(
                     "content": tool_output.text,
                 })
                 if (
-                    tc.name in {"read_file", "get_facts"}
+                    tc.name in {"read_file", "get_facts", "get_dossier"}
                     or (tc.name == "get_commit" and args.get("path"))
                 ):
                     pinned_results[tool_message_index] = tool_output.text
@@ -537,6 +538,7 @@ async def run_agent(
         final_answer = final_answer.translate(
             {ord(char): None for char in "\u200b\u200c\u200d\ufeff"}
         )
+        final_answer = final_answer.translate(ANSWER_CHAR_MAP)
         collected = {eid for s in steps for eid in s.evidence_ids}
         unverified_quotes = find_unverified_quotes(
             final_answer, tool_texts, evidence_ids=collected

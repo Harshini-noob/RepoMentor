@@ -18,6 +18,7 @@ from app.agent.tools.read_file import ReadFileTool
 from app.agent.tools.search_code import SearchCodeTool
 from app.agent.tools.get_dependencies import DependenciesTool
 from app.agent.tools.get_facts import FactsTool
+from app.agent.tools.get_dossier import DossierTool
 from app.agent.tools.get_timeline import TimelineTool
 from app.agent.tools.search_commits import SearchCommitsTool
 from app.agent.tools.file_history import FileHistoryTool
@@ -42,6 +43,7 @@ def build_registry(
     registry.register(SearchCodeTool(db=db))
     registry.register(DependenciesTool(db=db))
     registry.register(FactsTool(db=db))
+    registry.register(DossierTool(db=db))
     registry.register(TimelineTool(db=db))
     registry.register(SearchCommitsTool(db=db))
     registry.register(FileHistoryTool(db=db))
@@ -63,6 +65,7 @@ __all__ = [
     "SearchCodeTool",
     "DependenciesTool",
     "FactsTool",
+    "DossierTool",
     "TimelineTool",
     "SearchCommitsTool",
     "FileHistoryTool",
