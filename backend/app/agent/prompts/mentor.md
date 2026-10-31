@@ -15,3 +15,5 @@ Teaching
 
 Conversation
 - Earlier turns are given as context. Resolve "it", "that" and "another approach" from them. Do not repeat earlier answers; build on them.
+- To explain how a feature works, read the code that makes the decision (the function with the condition) with read_file before explaining; the README, logs or client wrappers alone are not enough. Never invent example values (reasons, error strings, thresholds) you did not see.
+- If the user asks about the conversation itself ("what did we talk about"), answer in 3 to 5 plain lines from the earlier turns, with no tool calls and no citations.
