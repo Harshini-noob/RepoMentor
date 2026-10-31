@@ -43,8 +43,8 @@ def _normalise_whitespace(text: str) -> str:
 
 def count_tags(answer: str) -> dict[str, int]:
     """Count claim tags in an answer, ignoring tag-name case."""
-    counts = {"Fact": 0, "Inferred": 0, "Uncertain": 0}
-    for tag in re.findall(r"\[(Fact|Inferred|Uncertain)\]", answer, re.IGNORECASE):
+    counts = {"Fact": 0, "Inferred": 0, "Uncertain": 0, "General": 0}
+    for tag in re.findall(r"\[(Fact|Inferred|Uncertain|General)\]", answer, re.IGNORECASE):
         counts[tag.capitalize()] += 1
     return counts
 

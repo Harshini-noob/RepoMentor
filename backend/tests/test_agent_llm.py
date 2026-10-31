@@ -4,7 +4,7 @@ import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError, RateLimitError
 
-from app.agent.llm import LLMDailyLimitError, chat
+from app.agent.llm import LLMDailyLimitError, LLMRateLimitError, chat
 from app.agent.state import (
     AgentRun,
     LLMReply,
@@ -301,7 +301,7 @@ async def test_chat_rate_limit_persistent_raises() -> None:
     # Fails on the initial attempt and both allowed retries.
     mock_client.chat.completions.create.side_effect = [rate_err, rate_err, rate_err]
 
-    with pytest.raises(RateLimitError):
+    with pytest.raises(LLMRateLimitError):
         await chat(messages=[{"role": "user", "content": "fail test"}], client=mock_client, backoff=0.01)
 
     assert mock_client.chat.completions.create.call_count == 3
@@ -345,7 +345,7 @@ async def test_chat_gives_up_when_retry_after_exceeds_backoff_budget(monkeypatch
     monkeypatch.setattr("app.agent.llm.asyncio.sleep", sleep)
     events: list[str] = []
 
-    with pytest.raises(RateLimitError):
+    with pytest.raises(LLMRateLimitError):
         await chat(
             messages=[{"role": "user", "content": "retry test"}],
             client=mock_client,

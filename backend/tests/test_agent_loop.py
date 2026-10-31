@@ -769,7 +769,11 @@ async def test_daily_token_limit_finishes_with_provider_message(
     )
 
     assert run.stop_reason == "error"
-    assert run.final_answer == message
+    assert run.final_answer == (
+        "The model's daily token limit was reached before I could finish. "
+        "Tools used: none. Evidence found so far: none. "
+        "Change LLM_MODEL or try tomorrow."
+    )
 
 
 # (d) The guard treats differently-cased searches and None keys as the same call

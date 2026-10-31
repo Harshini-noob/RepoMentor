@@ -157,7 +157,11 @@ async def run_evaluations(
     if limit is not None:
         questions = questions[:limit]
 
-    model = get_settings().llm_model
+    settings = get_settings()
+    model = settings.llm_model
+    fallback_model = getattr(settings, "llm_fallback_model", None) or None
+    if fallback_model:
+        print("WARNING: LLM_FALLBACK_MODEL is set; results may mix models")
     results: list[dict[str, Any]] = []
     for index, question in enumerate(questions):
         started = time.perf_counter()
@@ -204,6 +208,7 @@ async def run_evaluations(
     payload = {
         "project": project,
         "model": model,
+        "fallback_model": fallback_model,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "summary": summary,
         "results": results,

@@ -61,6 +61,7 @@ def test_count_tags_is_case_insensitive() -> None:
         "Fact": 2,
         "Inferred": 1,
         "Uncertain": 1,
+        "General": 0,
     }
 
 

@@ -22,7 +22,7 @@ from app.agent.evidence import (
 )
 
 from app.agent.guards import HISTORY_TOOLS, RepeatedCallGuard, is_why_question, should_warn_wrap_up
-from app.agent.llm import LLMDailyLimitError, LLMOutputParseError, chat as default_chat
+from app.agent.llm import LLMDailyLimitError, LLMRateLimitError, LLMOutputParseError, chat as default_chat
 from app.agent.state import AgentRun, LLMReply, ToolCall, TraceStep
 from app.agent.tools import build_registry
 from app.agent.tools.base import ToolOutput
@@ -129,6 +129,8 @@ async def run_agent(
     chat_fn: Callable[..., Any] | None = None,
     on_step: Callable[[TraceStep], None] | None = None,
     on_event: Callable[[str], None] | None = None,
+    system_prompt: str | None = None,
+    history: list[dict] | None = None,
 ) -> AgentRun:
     """
     Execute autonomous agent investigation loop up to max_steps:
@@ -145,11 +147,16 @@ async def run_agent(
     llm_chat = chat_fn if chat_fn is not None else default_chat
 
     # Setup prompt and message history
-    system_prompt = load_system_prompt()
+    active_system_prompt = (
+        system_prompt if system_prompt is not None else load_system_prompt()
+    )
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": goal},
+        {"role": "system", "content": active_system_prompt},
     ]
+    if history:
+        for item in history:
+            messages.append({"role": item["role"], "content": item["content"]})
+    messages.append({"role": "user", "content": goal})
 
     steps: list[TraceStep] = []
     total_tokens = 0
@@ -172,6 +179,7 @@ async def run_agent(
     repair_done = False
     repair_pending = False
     restore_pinned_for_next_call = False
+    is_limit_fallback = False
 
     try:
         step_idx = 0
@@ -499,9 +507,8 @@ async def run_agent(
                 final_tokens = (final_reply.usage.get("input_tokens", 0) + final_reply.usage.get("output_tokens", 0)) if final_reply.usage else 0
                 total_tokens += final_tokens
                 final_answer = final_reply.content or None
-            except LLMDailyLimitError as limit_exc:
-                stop_reason = "error"
-                final_answer = str(limit_exc)
+            except (LLMRateLimitError, LLMDailyLimitError):
+                raise
             except Exception as fin_exc:
                 logger.warning("Finalization LLM call failed: %s", fin_exc)
                 final_answer = None
@@ -518,10 +525,30 @@ async def run_agent(
                     "Could not determine a definitive final answer due to execution errors."
                 )
 
+    except LLMRateLimitError as exc:
+        logger.warning("Per-minute LLM token limit reached: %s", exc)
+        stop_reason = "error"
+        tools_used = sorted(list({s.tool for s in steps if s.tool and s.tool not in {"error", "policy_nudge", "policy_repair"}}))
+        tools_str = ", ".join(tools_used) if tools_used else "none"
+        ev_str = _format_evidence_ids(steps)
+        final_answer = (
+            f"The model's token limit was reached before I could finish. "
+            f"Tools used: {tools_str}. Evidence found so far: {ev_str}. "
+            "Try again in a minute."
+        )
+        is_limit_fallback = True
     except LLMDailyLimitError as exc:
         logger.warning("Daily LLM token limit reached: %s", exc)
         stop_reason = "error"
-        final_answer = str(exc)
+        tools_used = sorted(list({s.tool for s in steps if s.tool and s.tool not in {"error", "policy_nudge", "policy_repair"}}))
+        tools_str = ", ".join(tools_used) if tools_used else "none"
+        ev_str = _format_evidence_ids(steps)
+        final_answer = (
+            f"The model's daily token limit was reached before I could finish. "
+            f"Tools used: {tools_str}. Evidence found so far: {ev_str}. "
+            "Change LLM_MODEL or try tomorrow."
+        )
+        is_limit_fallback = True
     except Exception as exc:
         logger.exception("Agent run encountered unhandled error: %s", exc)
         stop_reason = "error"
@@ -534,7 +561,7 @@ async def run_agent(
             f"Tools used: {tools_str}. Evidence IDs gathered: {ev_str}. "
             "Could not determine a definitive final answer due to execution errors."
         )
-    if final_answer:
+    if final_answer and not is_limit_fallback:
         final_answer = final_answer.translate(
             {ord(char): None for char in "\u200b\u200c\u200d\ufeff"}
         )

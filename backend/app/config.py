@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     llm_base_url: str | None = None
     llm_model: str = "gemini-3.8-flash"
     llm_reasoning_effort: str = "low"
+    llm_fallback_model: str | None = None
 
     # Legacy Groq fields — kept for backward compat; ignored when llm_* are set
     groq_api_key: str | None = None

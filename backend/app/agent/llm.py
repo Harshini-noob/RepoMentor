@@ -49,6 +49,10 @@ class LLMDailyLimitError(Exception):
     """Raised when the provider reports that the model's daily token quota is exhausted."""
 
 
+class LLMRateLimitError(Exception):
+    """Raised when a per-minute rate limit is reached and retries are exhausted or wait is too long."""
+
+
 _client: AsyncOpenAI | None = None
 
 
@@ -134,17 +138,23 @@ async def chat(
     Execute a chat completion via the OpenAI-compatible API.
 
     Retries transient API errors with bounded backoff.
+    Fails over to LLM_FALLBACK_MODEL on long 429 wait times (> 5s).
+    Raises LLMRateLimitError or LLMDailyLimitError on rate limit exhaustion.
     Retries up to 2 times on BadRequestError with 'output_parse_failed' or 'tool_use_failed',
     raising LLMOutputParseError if all retries fail.
     Parses tool-call arguments with json.loads and, if malformed,
     returns the error text in the ToolCall object instead of crashing.
     """
     settings = get_settings()
-    selected_model = (
+    primary_model = (
         model
         or getattr(settings, "llm_model", None)
         or getattr(settings, "groq_model", None)
     )
+    fallback_model = getattr(settings, "llm_fallback_model", None) or ""
+    current_model = primary_model
+    fallback_used = False
+
     llm_client = client or get_llm_client()
 
     def emit(text: str) -> None:
@@ -155,10 +165,10 @@ async def chat(
                 pass
 
     kwargs: dict[str, Any] = {
-        "model": selected_model,
+        "model": current_model,
         "messages": messages,
     }
-    if selected_model.startswith("openai/gpt-oss"):
+    if current_model and current_model.startswith("openai/gpt-oss"):
         configured_fields = getattr(settings, "model_fields_set", None)
         llm_effort = getattr(settings, "llm_reasoning_effort", None)
         if llm_effort and (
@@ -184,6 +194,7 @@ async def chat(
 
     while True:
         try:
+            kwargs["model"] = current_model
             response = await llm_client.chat.completions.create(**kwargs)
             break
         except BadRequestError as b_exc:
@@ -209,19 +220,53 @@ async def chat(
         except Exception as exc:
             status = getattr(exc, "status_code", None)
             error_text = f"{exc} {getattr(exc, 'body', '')}".lower()
-            if status == 429 and (
+            is_429 = (status == 429 or isinstance(exc, RateLimitError))
+            is_daily = is_429 and (
                 "tokens per day" in error_text or re.search(r"\btpd\b", error_text)
+            )
+
+            would_wait = (
+                float("inf")
+                if is_daily
+                else _retry_after_seconds(exc, backoff * 2**retries_so_far)
+            )
+
+            # Failover: if 429 would wait > 5s and a different fallback model is set
+            if (
+                is_429
+                and would_wait > 5.0
+                and fallback_model
+                and fallback_model != current_model
+                and not fallback_used
             ):
+                fallback_used = True
+                emit(f"switching to {fallback_model} (rate limit on {current_model})")
+                logger.warning(
+                    "Switching to %s (rate limit on %s)", fallback_model, current_model
+                )
+                current_model = fallback_model
+                if current_model.startswith("openai/gpt-oss"):
+                    kwargs["extra_body"] = {"reasoning_effort": "low"}
+                elif "extra_body" in kwargs and not current_model.startswith("openai/gpt-oss"):
+                    kwargs.pop("extra_body", None)
+                continue
+
+            if is_daily:
                 raise LLMDailyLimitError(
-                    f"Daily token limit reached for model {selected_model}. "
+                    f"Daily token limit reached for model {current_model}. "
                     "Try again later or change LLM_MODEL."
                 ) from exc
+
             if not _is_retryable_error(exc) or retries_so_far >= MAX_TRANSIENT_RETRIES:
+                if is_429:
+                    raise LLMRateLimitError("per-minute token limit reached") from exc
                 raise
 
-            wait = _retry_after_seconds(exc, backoff * 2**retries_so_far)
+            wait = would_wait
             if total_wait + wait > MAX_TOTAL_BACKOFF_S:
                 emit(f"rate limit wait of {wait:g}s is too long, giving up")
+                if is_429:
+                    raise LLMRateLimitError("per-minute token limit reached") from exc
                 raise
 
             emit(f"waiting {wait:g}s before retry ({type(exc).__name__})")
