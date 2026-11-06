@@ -2,9 +2,11 @@
 RepoMentor Agent CLI:
 Usage: python -m app.cli ask <project_id> "<question>"
        python -m app.cli chat <project_id> [--session <id>]
+       python -m app.cli interview-question <project_id> --round <name> --difficulty <int> [--commit <sha>] [--dry-run] [--show-seed]
 """
 
 import asyncio
+import inspect
 import logging
 import os
 import sys
@@ -13,6 +15,7 @@ from typing import Any, Callable
 from app.agent.loop import run_agent
 from app.agent.state import AgentRun, TraceStep
 from app.core.db import get_db
+from app.interview.generate import generate_question
 from app.mentor.chat import ask
 from app.mentor.sessions import create_session, get_session
 
@@ -20,6 +23,7 @@ from app.mentor.sessions import create_session, get_session
 def print_usage() -> None:
     print('Usage: python -m app.cli ask <project_id> "<question>"')
     print('       python -m app.cli chat <project_id> [--session <id>]')
+    print('       python -m app.cli interview-question <project_id> --round <name> --difficulty <int> [--commit <sha>] [--dry-run] [--show-seed]')
     print('Example: python -m app.cli ask proj_123 "What dependencies does this project use?"')
     print('         python -m app.cli chat proj_123')
 
@@ -129,6 +133,26 @@ async def _async_chat(
     return 0
 
 
+def _print_interview_result(result: Any, show_seed: bool) -> None:
+    if isinstance(result, dict):
+        question = result.get("question")
+        answer = result.get("answer")
+        seed = result.get("seed")
+    else:
+        question = getattr(result, "question", None)
+        answer = getattr(result, "answer", None)
+        seed = getattr(result, "seed", None)
+        if question is None and isinstance(result, (tuple, list)):
+            question = result[0] if result else None
+            answer = result[1] if len(result) > 1 else None
+            seed = result[2] if len(result) > 2 else seed
+
+    if show_seed:
+        print(f"Seed: {seed}" if seed is not None else "Seed: (not provided)")
+    print(f"Question: {question}" if question is not None else "Question: (not provided)")
+    print(f"Answer: {answer}" if answer is not None else "Answer: (not provided)")
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO if os.getenv("REPOMENTOR_DEBUG") else logging.CRITICAL
@@ -153,6 +177,87 @@ def main() -> None:
         except Exception as exc:
             print(f"Execution error: {exc}", file=sys.stderr)
             sys.exit(1)
+
+    elif cmd == "interview-question":
+        if len(args) < 2:
+            print_usage()
+            sys.exit(1)
+
+        project_id = args[1]
+        round_name: str | None = None
+        difficulty: int | None = None
+        commit: str | None = None
+        dry_run = False
+        show_seed = False
+        i = 2
+
+        try:
+            while i < len(args):
+                flag = args[i]
+                if flag in ("--round", "--difficulty", "--commit"):
+                    if i + 1 >= len(args):
+                        print(f"Error: {flag} requires an argument", file=sys.stderr)
+                        print_usage()
+                        sys.exit(1)
+                    value = args[i + 1]
+                    i += 2
+                    if flag == "--round":
+                        round_name = value
+                    elif flag == "--difficulty":
+                        difficulty = int(value)
+                    else:
+                        commit = value
+                elif flag.startswith("--round="):
+                    round_name = flag.split("=", 1)[1]
+                    i += 1
+                elif flag.startswith("--difficulty="):
+                    difficulty = int(flag.split("=", 1)[1])
+                    i += 1
+                elif flag.startswith("--commit="):
+                    commit = flag.split("=", 1)[1]
+                    i += 1
+                elif flag == "--dry-run":
+                    dry_run = True
+                    i += 1
+                elif flag == "--show-seed":
+                    show_seed = True
+                    i += 1
+                else:
+                    print(f"Error: unknown argument: {flag}", file=sys.stderr)
+                    print_usage()
+                    sys.exit(1)
+        except ValueError:
+            print("Error: --difficulty must be an integer", file=sys.stderr)
+            print_usage()
+            sys.exit(1)
+
+        if not round_name:
+            print("Error: --round is required", file=sys.stderr)
+            print_usage()
+            sys.exit(1)
+        if difficulty is None:
+            print("Error: --difficulty is required", file=sys.stderr)
+            print_usage()
+            sys.exit(1)
+
+        try:
+            generation = generate_question(
+                project_id,
+                round=round_name,
+                difficulty=difficulty,
+                commit=commit,
+                dry_run=dry_run,
+            )
+            if inspect.isawaitable(generation):
+                generation = asyncio.run(generation)
+            _print_interview_result(generation, show_seed)
+            sys.exit(0)
+        except KeyboardInterrupt:
+            print("Interrupted during interview generation.", file=sys.stderr)
+            sys.exit(130)
+        except Exception as exc:
+            print(f"Generation error: {exc}", file=sys.stderr)
+            sys.exit(2)
 
     elif cmd == "chat":
         if len(args) < 2:

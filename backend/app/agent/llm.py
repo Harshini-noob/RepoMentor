@@ -252,8 +252,9 @@ async def chat(
                 continue
 
             if is_daily:
+                # Report the primary model requested by the caller, even if we switched to a fallback
                 raise LLMDailyLimitError(
-                    f"Daily token limit reached for model {current_model}. "
+                    f"Daily token limit reached for model {primary_model}. "
                     "Try again later or change LLM_MODEL."
                 ) from exc
 

@@ -441,3 +441,45 @@ def test_pydantic_state_models() -> None:
     assert reply.content == "Done"
     assert len(reply.tool_calls) == 1
     assert reply.usage["input_tokens"] == 100
+
+# New test for fallback and daily limit handling
+@pytest.mark.asyncio
+async def test_fallback_and_daily_limit(monkeypatch):
+    """Long per‑minute 429 triggers fallback; daily‑limit on both raises error naming primary model."""
+    # Settings: primary and fallback models defined
+    settings = SimpleNamespace(
+        llm_api_key="test-key",
+        llm_base_url=None,
+        llm_model="primary-model",
+        llm_fallback_model="fallback-model",
+    )
+    monkeypatch.setattr("app.agent.llm.get_settings", lambda: settings)
+
+    # Mock client side effects:
+    # 1. Primary model: 429 with retry‑after 10s (long) -> triggers fallback.
+    req = httpx.Request("POST", "https://api.groq.com/chat")
+    rate_err_long = RateLimitError(
+        "Rate limit per minute", response=httpx.Response(429, request=req, headers={"retry-after": "10"})
+    )
+    # 2. Fallback model succeeds
+    success_resp = _make_mock_response(content="fallback success")
+    # 3. Primary model again (when fallback already used) gets daily limit error
+    daily_err = RateLimitError(
+        "tokens per day exceeded", response=httpx.Response(429, request=req), body={"error": "tokens per day exceeded"}
+    )
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create.side_effect = [rate_err_long, success_resp, daily_err]
+
+    # First call: should succeed via fallback
+    reply = await chat(messages=[{"role": "user", "content": "test"}], client=mock_client)
+    assert reply.content == "fallback success"
+    # Verify two calls were made (primary then fallback)
+    assert mock_client.chat.completions.create.call_count == 2
+    # Reset call count for next scenario
+    mock_client.chat.completions.create.reset_mock()
+    mock_client.chat.completions.create.side_effect = [daily_err]
+
+    # Second call: both primary and fallback hit daily limit, should raise LLMDailyLimitError naming primary
+    with pytest.raises(LLMDailyLimitError) as exc_info:
+        await chat(messages=[{"role": "user", "content": "daily"}], client=mock_client)
+    assert str(exc_info.value).startswith("Daily token limit reached for model primary-model")
