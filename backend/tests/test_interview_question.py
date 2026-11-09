@@ -82,9 +82,9 @@ def _valid_llm_data(concept: str = "database-choice") -> dict:
         "question": "Why did you choose MongoDB for this project?",
         "concept": concept,
         "key_points": [
-            {"point": "Schema flexibility for evolving data models", "kind": "general"},
-            {"point": "Horizontal scaling via sharding", "kind": "general"},
-            {"point": "Chosen over PostgreSQL due to variable document structure", "kind": "repo"},
+            {"point": "Schema flexibility for evolving data models", "kind": "general", "support": None},
+            {"point": "Horizontal scaling via sharding", "kind": "general", "support": None},
+            {"point": "Chosen over PostgreSQL due to variable document structure", "kind": "general", "support": None},
         ],
         "common_mistakes": [
             "Confusing schema flexibility with absence of data validation",
@@ -338,10 +338,174 @@ class TestGenerateQuestion:
 
 
 # ---------------------------------------------------------------------------
-# Guard: no file in app/interview reads evals/questions.json
+# Tests: key-point repo-grounding validation (new tightening rules)
 # ---------------------------------------------------------------------------
 
-class TestNoEvalsQuestionsJsonRead:
+class TestKeyPointValidation:
+    """Tests for the three downgrade rules applied to key points of kind 'repo'."""
+
+    def _db_with_single_seed(self, claim_text: str = "Uses MongoDB as main database with document storage"):
+        """Create a DB with a dossier that has exactly one tech claim as the seed."""
+        db = _make_db()
+        dossier = _make_dossier(sections={
+            "technologies": [
+                _fact(claim_text, ["fact:database:mongodb", "file:app/db.py#L1-5"]),
+            ],
+            **{s: [] for s in ["decisions", "data", "components", "apis", "features", "identity", "timeline", "quality"]},
+        })
+        db.dossiers.insert_one(dossier)
+        return db
+
+    @pytest.mark.asyncio
+    async def test_repo_point_with_no_support_becomes_general(self):
+        """A repo key point with no support field should be downgraded to general."""
+        data = {
+            "question": "Why did you use document storage in your project?",
+            "concept": "database-choice",
+            "key_points": [
+                {"point": "MongoDB document storage used here", "kind": "repo"},  # no support
+                {"point": "Flexible schema design", "kind": "general", "support": None},
+                {"point": "Data modelling choice", "kind": "general", "support": None},
+            ],
+            "common_mistakes": ["Assuming schema-less means no constraints"],
+        }
+        fake_chat = AsyncMock(return_value=_make_llm_reply(data))
+        db = self._db_with_single_seed()
+
+        result = await generate_question(db, "proj_test", "tech", 2, chat_fn=fake_chat, save=False)
+
+        # The repo point with no support must be downgraded
+        repo_kinds = [kp.kind for kp in result.key_points if "MongoDB document" in kp.point]
+        assert repo_kinds == ["general"]
+        assert any("no valid seed line" in n for n in result.validation_notes)
+
+    @pytest.mark.asyncio
+    async def test_repo_point_with_latency_not_in_seed_becomes_general(self):
+        """A repo point claiming 'reduced latency' when seed line 1 says nothing about latency."""
+        data = {
+            "question": "Why did you use document storage in your project?",
+            "concept": "database-choice",
+            "key_points": [
+                # support=1 but seed line 1 has no 'latency' word
+                {"point": "MongoDB storage reduced latency significantly", "kind": "repo", "support": 1},
+                {"point": "Flexible schema design", "kind": "general", "support": None},
+                {"point": "Data modelling benefit", "kind": "general", "support": None},
+            ],
+            "common_mistakes": ["Assuming schema-less means no constraints"],
+        }
+        fake_chat = AsyncMock(return_value=_make_llm_reply(data))
+        db = self._db_with_single_seed()
+
+        result = await generate_question(db, "proj_test", "tech", 2, chat_fn=fake_chat, save=False)
+
+        latency_kp = next(kp for kp in result.key_points if "latency" in kp.point)
+        assert latency_kp.kind == "general"
+        assert any("effect not stated in the seed" in n for n in result.validation_notes)
+
+    @pytest.mark.asyncio
+    async def test_valid_repo_point_stays_repo(self):
+        """A repo point that cites a valid seed line with enough word overlap stays repo."""
+        # Seed line 1: "Uses MongoDB as main database with document storage"
+        # Point: "MongoDB database document storage" — shares: mongodb, database, document, storage
+        data = {
+            "question": "Why did you use document storage in your project?",
+            "concept": "database-choice",
+            "key_points": [
+                {"point": "MongoDB database uses document storage format", "kind": "repo", "support": 1},
+                {"point": "Schema flexibility advantage", "kind": "general", "support": None},
+                {"point": "Data modelling benefit", "kind": "general", "support": None},
+            ],
+            "common_mistakes": ["Assuming schema-less means no constraints"],
+        }
+        fake_chat = AsyncMock(return_value=_make_llm_reply(data))
+        db = self._db_with_single_seed()
+
+        result = await generate_question(db, "proj_test", "tech", 2, chat_fn=fake_chat, save=False)
+
+        repo_kp = next(kp for kp in result.key_points if "document storage format" in kp.point)
+        assert repo_kp.kind == "repo"
+        assert repo_kp.support == 1
+
+    @pytest.mark.asyncio
+    async def test_numbered_seed_lines_in_user_message(self):
+        """The user message sent to the LLM must number seed lines starting at 1."""
+        data = _valid_llm_data()
+        captured_messages: list = []
+
+        async def capturing_chat(messages, **kwargs):
+            captured_messages.extend(messages)
+            return _make_llm_reply(data)
+
+        db = self._db_with_single_seed()
+        await generate_question(db, "proj_test", "tech", 2, chat_fn=capturing_chat, save=False)
+
+        user_content = next(m["content"] for m in captured_messages if m["role"] == "user")
+        # Must contain "1." at the start of the first seed line
+        assert "1." in user_content
+        # Must NOT contain unnumbered bullet like "\n- [" (old format)
+        assert "\n- [" not in user_content
+
+    @pytest.mark.asyncio
+    async def test_question_with_banned_phrase_triggers_retry(self):
+        """A question containing 'the team' should trigger one retry with guidance."""
+        bad_data = {
+            "question": "Why did the team decide to use MongoDB in your project?",
+            "concept": "database-choice",
+            "key_points": [
+                {"point": "Schema flexibility", "kind": "general", "support": None},
+                {"point": "Document store design", "kind": "general", "support": None},
+                {"point": "Horizontal scalability", "kind": "general", "support": None},
+            ],
+            "common_mistakes": ["Ignoring transactions"],
+        }
+        good_data = {
+            "question": "Why did you choose MongoDB for your project?",
+            "concept": "database-choice",
+            "key_points": [
+                {"point": "Schema flexibility", "kind": "general", "support": None},
+                {"point": "Document store design", "kind": "general", "support": None},
+                {"point": "Horizontal scalability", "kind": "general", "support": None},
+            ],
+            "common_mistakes": ["Ignoring transactions"],
+        }
+        fake_chat = AsyncMock(side_effect=[
+            _make_llm_reply(bad_data),   # first call: has "the team"
+            _make_llm_reply(good_data),  # retry: clean question
+        ])
+        db = self._db_with_single_seed()
+
+        result = await generate_question(db, "proj_test", "tech", 2, chat_fn=fake_chat, save=False)
+
+        assert "the team" not in result.question.lower()
+        assert fake_chat.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_validation_notes_saved_with_question(self):
+        """validation_notes should be persisted in the DB document."""
+        data = {
+            "question": "Why did you use document storage in your project?",
+            "concept": "database-choice",
+            "key_points": [
+                {"point": "MongoDB storage reduced latency", "kind": "repo", "support": 1},
+                {"point": "Flexible schema design", "kind": "general", "support": None},
+                {"point": "Data modelling benefit", "kind": "general", "support": None},
+            ],
+            "common_mistakes": ["Assuming schema-less means no constraints"],
+        }
+        fake_chat = AsyncMock(return_value=_make_llm_reply(data))
+        db = self._db_with_single_seed()
+
+        result = await generate_question(db, "proj_test", "tech", 2, chat_fn=fake_chat, save=True)
+
+        saved = db.interview_questions.find_one({"question_id": result.question_id})
+        assert saved is not None
+        assert isinstance(saved.get("validation_notes"), list)
+        assert len(saved["validation_notes"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# Guard: no file in app/interview reads evals/questions.json
+# ---------------------------------------------------------------------------class TestNoEvalsQuestionsJsonRead:
     def test_no_interview_file_reads_evals_questions_json(self):
         """
         Statically verify no source file under app/interview imports or opens evals/questions.json.

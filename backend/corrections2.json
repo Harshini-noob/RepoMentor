@@ -1,0 +1,19 @@
+{
+  "add": [
+    {
+      "section": "decisions", "tag": "fact", "commit": "02a5c7b",
+      "text": "build_model_metadata in routing_policy.py falls back to the registry's hand-set quality_tier when there is not enough real verification data for a model yet",
+      "evidence": ["commit:02a5c7b:routing_policy.py"]
+    },
+    {
+      "section": "decisions", "tag": "fact", "commit": "02a5c7b",
+      "text": "select_model now calls build_model_metadata on every request, so quality is read at request time instead of once from a dictionary built at import time",
+      "evidence": ["commit:02a5c7b:routing_policy.py"]
+    },
+    {
+      "section": "decisions", "tag": "fact", "commit": "02a5c7b",
+      "text": "log_full_request writes one requests row, one model_calls row per model call (more than one only if escalation happened) and one quality_scores row per verified call",
+      "evidence": ["commit:02a5c7b:logger.py"]
+    }
+  ]
+}

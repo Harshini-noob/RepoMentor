@@ -150,10 +150,18 @@ def _print_interview_result(result: "InterviewQuestion", show_seed: bool) -> Non
     print(f"Concept:  {result.concept}  (difficulty {result.difficulty})")
     print("\nKey points:")
     for kp in result.key_points:
-        print(f"  [{kp.kind}] {kp.point}")
+        if kp.kind == "repo" and kp.support is not None:
+            label = f"repo -> seed line {kp.support}"
+        else:
+            label = "general"
+        print(f"  [{label}] {kp.point}")
     print("\nCommon mistakes:")
     for m in result.common_mistakes:
         print(f"  - {m}")
+    if getattr(result, "validation_notes", None):
+        print("\nValidation notes:")
+        for vn in result.validation_notes:
+            print(f"  {vn}")
 
 
 def main() -> None:

@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 class KeyPoint(BaseModel):
     point: str
     kind: Literal["repo", "general"]
+    support: int | None = None   # 1-based seed-line number; only set when kind="repo"
+    note: str | None = None      # set when kind was downgraded from repo → general
 
 
 class InterviewQuestion(BaseModel):
@@ -24,4 +26,5 @@ class InterviewQuestion(BaseModel):
     key_points: list[KeyPoint]
     common_mistakes: list[str]
     seed: dict
+    validation_notes: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
