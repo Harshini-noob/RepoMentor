@@ -459,7 +459,7 @@ async def test_fallback_and_daily_limit(monkeypatch):
     # 1. Primary model: 429 with retry‑after 10s (long) -> triggers fallback.
     req = httpx.Request("POST", "https://api.groq.com/chat")
     rate_err_long = RateLimitError(
-        "Rate limit per minute", response=httpx.Response(429, request=req, headers={"retry-after": "10"})
+        "Rate limit per minute", response=httpx.Response(429, request=req, headers={"retry-after": "10"}), body={"error": "rate limit per minute"}
     )
     # 2. Fallback model succeeds
     success_resp = _make_mock_response(content="fallback success")

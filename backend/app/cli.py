@@ -6,7 +6,6 @@ Usage: python -m app.cli ask <project_id> "<question>"
 """
 
 import asyncio
-import inspect
 import logging
 import os
 import sys
@@ -15,7 +14,7 @@ from typing import Any, Callable
 from app.agent.loop import run_agent
 from app.agent.state import AgentRun, TraceStep
 from app.core.db import get_db
-from app.interview.generate import generate_question
+from app.interview.generate import InterviewGenerationError, generate_question
 from app.mentor.chat import ask
 from app.mentor.sessions import create_session, get_session
 
@@ -133,24 +132,28 @@ async def _async_chat(
     return 0
 
 
-def _print_interview_result(result: Any, show_seed: bool) -> None:
-    if isinstance(result, dict):
-        question = result.get("question")
-        answer = result.get("answer")
-        seed = result.get("seed")
-    else:
-        question = getattr(result, "question", None)
-        answer = getattr(result, "answer", None)
-        seed = getattr(result, "seed", None)
-        if question is None and isinstance(result, (tuple, list)):
-            question = result[0] if result else None
-            answer = result[1] if len(result) > 1 else None
-            seed = result[2] if len(result) > 2 else seed
-
+def _print_interview_result(result: "InterviewQuestion", show_seed: bool) -> None:
     if show_seed:
-        print(f"Seed: {seed}" if seed is not None else "Seed: (not provided)")
-    print(f"Question: {question}" if question is not None else "Question: (not provided)")
-    print(f"Answer: {answer}" if answer is not None else "Answer: (not provided)")
+        seed = result.seed
+        print("Seed:")
+        print(f"  section: {seed.get('section')}")
+        if seed.get("commit"):
+            print(f"  commit:  {seed['commit']}")
+        for c in seed.get("claims", []):
+            tag = c.get("tag", "?")
+            claim = c.get("claim", "")
+            ev = c.get("evidence") or []
+            ev_str = ", ".join(ev[:4])
+            print(f"  [{tag}] {claim}  ({ev_str})")
+
+    print(f"\nQuestion: {result.question}")
+    print(f"Concept:  {result.concept}  (difficulty {result.difficulty})")
+    print("\nKey points:")
+    for kp in result.key_points:
+        print(f"  [{kp.kind}] {kp.point}")
+    print("\nCommon mistakes:")
+    for m in result.common_mistakes:
+        print(f"  - {m}")
 
 
 def main() -> None:
@@ -241,20 +244,29 @@ def main() -> None:
             sys.exit(1)
 
         try:
-            generation = generate_question(
-                project_id,
-                round=round_name,
-                difficulty=difficulty,
-                commit=commit,
-                dry_run=dry_run,
-            )
-            if inspect.isawaitable(generation):
-                generation = asyncio.run(generation)
-            _print_interview_result(generation, show_seed)
+            async def _run_gen() -> None:
+                database = get_db()
+                result = await generate_question(
+                    database,
+                    project_id,
+                    round_name=round_name,
+                    difficulty=difficulty,
+                    commit=commit,
+                    save=not dry_run,
+                )
+                _print_interview_result(result, show_seed)
+                usage = getattr(result, "_usage", None)
+                if usage:
+                    print(f"\nTokens used: {usage}")
+
+            asyncio.run(_run_gen())
             sys.exit(0)
         except KeyboardInterrupt:
             print("Interrupted during interview generation.", file=sys.stderr)
             sys.exit(130)
+        except InterviewGenerationError as exc:
+            print(f"Generation error: {exc}", file=sys.stderr)
+            sys.exit(2)
         except Exception as exc:
             print(f"Generation error: {exc}", file=sys.stderr)
             sys.exit(2)

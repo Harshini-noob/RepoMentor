@@ -232,8 +232,10 @@ async def chat(
             )
 
             # Failover: if 429 would wait > 5s and a different fallback model is set
+            # but do NOT failover on a daily-limit error (quota is exhausted, not just rate-limited)
             if (
                 is_429
+                and not is_daily
                 and would_wait > 5.0
                 and fallback_model
                 and fallback_model != current_model
