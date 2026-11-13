@@ -16,7 +16,7 @@ from typing import Any, Callable
 from app.agent.llm import chat
 from app.agent.state import LLMReply
 
-from .concepts import CONCEPTS, DIFFICULTY, ROUNDS
+from .concepts import CONCEPTS, DIFFICULTY, ROUNDS, candidate_concepts
 from .schema import InterviewQuestion, KeyPoint
 
 logger = logging.getLogger("repomentor.interview")
@@ -44,8 +44,16 @@ _STOPWORDS = {
     "one", "two", "new", "just", "how", "what", "why",
 }
 
-# Phrases banned in question text; triggers one retry
-_BANNED_PHRASES = ("the team", "recent", "recently")
+# Phrases banned in question text; triggers one retry, then fails
+_BANNED_QUESTION_PHRASES = (
+    "the team",
+    "recent",
+    "recently",
+    "did you consider",
+    "you considered",
+    "you decided",
+    "you evaluated",
+)
 
 
 class InterviewGenerationError(RuntimeError):
@@ -114,9 +122,18 @@ async def generate_question(
     seed = pick_seed(dossier, round_name, asked, commit=commit)
     seed_claims = seed.get("claims", [])
 
-    # 4. Build user message with numbered seed lines (1-based)
+    # Seed text for candidates and name grounding
+    seed_text = " ".join(
+        c.get("claim", "") + " " + " ".join(c.get("evidence") or [])
+        for c in seed_claims
+    ).lower()
+
+    candidates = candidate_concepts(seed_text)
+    seed["candidate_concepts"] = candidates
+
+    # 4. Build user message with numbered seed lines (1-based) and candidate concepts
     difficulty_label = DIFFICULTY.get(difficulty, str(difficulty))
-    concepts_str = ", ".join(CONCEPTS)
+    concepts_str = ", ".join(candidates)
     seed_lines_text = "\n".join(
         f"{i + 1}. [{c['tag'].capitalize()}] {c['claim']} (evidence: {', '.join(c['evidence'][:4])})"
         for i, c in enumerate(seed_claims)
@@ -153,13 +170,13 @@ async def generate_question(
     # 6. Structural validation
     _validate_structure(data)
 
-    # 7. Question-text validation: reject banned phrases, retry once
+    # 7. Question-text validation: reject banned phrases, retry once, then fail
     banned_found = _check_banned_phrases(data.get("question", ""))
     if banned_found:
         logger.warning("Question contains banned phrase(s) %s — retrying.", banned_found)
         guidance = (
-            f"The question contains banned phrases: {', '.join(repr(p) for p in banned_found)}. "
-            "Rewrite the question avoiding those words."
+            f"The question contains forbidden phrases: {', '.join(repr(p) for p in banned_found)}. "
+            "Rewrite the question avoiding those phrases."
         )
         messages_b = [
             {"role": "system", "content": _SYSTEM_PROMPT},
@@ -171,21 +188,21 @@ async def generate_question(
         data_b, parse_ok_b = _parse_json(reply_b.content or "")
         if parse_ok_b:
             _validate_structure(data_b)
+            banned_again = _check_banned_phrases(data_b.get("question", ""))
+            if banned_again:
+                raise InterviewGenerationError(
+                    f"Generated question still contains forbidden phrases: "
+                    f"{', '.join(repr(p) for p in banned_again)}. Saving nothing."
+                )
             data = data_b
             reply = reply_b
-        # If retry still fails we proceed with original (validation_notes will record it)
+        else:
+            raise InterviewGenerationError(
+                f"Generated question still contains forbidden phrases: "
+                f"{', '.join(repr(p) for p in banned_found)}. Saving nothing."
+            )
 
-    # 8. Concept coercion
-    if data.get("concept") not in CONCEPTS:
-        logger.warning("Unknown concept %r — coercing to 'general'.", data.get("concept"))
-        data["concept"] = "general"
-
-    # 9. Name-grounding validation
-    seed_text = " ".join(
-        c.get("claim", "") + " " + " ".join(c.get("evidence") or [])
-        for c in seed_claims
-    ).lower()
-
+    # 8. Name-grounding validation
     bad_names = _find_ungrounded_names(data, seed_text)
     if bad_names:
         # Retry once with guidance
@@ -204,8 +221,6 @@ async def generate_question(
         data2, parse_ok2 = _parse_json(reply3.content or "")
         if parse_ok2:
             _validate_structure(data2)
-            if data2.get("concept") not in CONCEPTS:
-                data2["concept"] = "general"
             bad_names2 = _find_ungrounded_names(data2, seed_text)
             if bad_names2:
                 raise InterviewGenerationError(
@@ -219,10 +234,21 @@ async def generate_question(
                 f"{', '.join(sorted(bad_names))}. Saving nothing."
             )
 
+    # 9. Concept validation: if not in candidates, set to first candidate
+    validation_notes: list[str] = []
+    if data.get("concept") not in candidates:
+        logger.warning(
+            "Returned concept %r not in candidates %r — replacing with %r.",
+            data.get("concept"), candidates, candidates[0],
+        )
+        data["concept"] = candidates[0]
+        validation_notes.append("concept replaced by code")
+
     # 10. Key-point repo-grounding checks (after name validation, before saving)
-    key_points, validation_notes = _validate_key_points(
+    key_points, kp_notes = _validate_key_points(
         data.get("key_points", []), seed_claims
     )
+    validation_notes.extend(kp_notes)
 
     # 11. Build model
     iq = InterviewQuestion(
@@ -234,6 +260,7 @@ async def generate_question(
         key_points=key_points,
         common_mistakes=data.get("common_mistakes", []),
         seed=seed,
+        candidate_concepts=candidates,
         validation_notes=validation_notes,
     )
 
@@ -283,7 +310,7 @@ def _validate_structure(data: dict) -> None:
 def _check_banned_phrases(question: str) -> list[str]:
     """Return banned phrases found in the question text."""
     q_lower = question.lower()
-    return [p for p in _BANNED_PHRASES if p in q_lower]
+    return [p for p in _BANNED_QUESTION_PHRASES if p in q_lower]
 
 
 def _find_ungrounded_names(data: dict, seed_text_lower: str) -> set[str]:

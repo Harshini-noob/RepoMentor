@@ -26,5 +26,6 @@ class InterviewQuestion(BaseModel):
     key_points: list[KeyPoint]
     common_mistakes: list[str]
     seed: dict
+    candidate_concepts: list[str] = Field(default_factory=list)
     validation_notes: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

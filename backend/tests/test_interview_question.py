@@ -18,7 +18,7 @@ import pytest
 import pytest_asyncio
 
 from app.agent.state import LLMReply
-from app.interview.concepts import CONCEPTS
+from app.interview.concepts import CONCEPTS, candidate_concepts
 from app.interview.generate import InterviewGenerationError, generate_question
 from app.interview.schema import InterviewQuestion, KeyPoint
 from app.interview.seeds import pick_seed
@@ -65,8 +65,11 @@ def _fact(claim: str, evidence: list[str], commit: str | None = None) -> dict:
     return {"claim": claim, "tag": "fact", "evidence": evidence, "details": details}
 
 
-def _inferred(claim: str, evidence: list[str]) -> dict:
-    return {"claim": claim, "tag": "inferred", "evidence": evidence, "details": {}}
+def _inferred(claim: str, evidence: list[str], commit: str | None = None) -> dict:
+    details: dict = {}
+    if commit:
+        details["commit"] = commit
+    return {"claim": claim, "tag": "inferred", "evidence": evidence, "details": details}
 
 
 def _make_llm_reply(data: dict) -> LLMReply:
@@ -157,14 +160,65 @@ class TestPickSeedHistory:
         with pytest.raises(RuntimeError, match="run the dossier builder first"):
             pick_seed(dossier, "history", asked=[])
 
-    def test_seed_claims_max_6(self):
+    def test_seed_claims_max_7(self):
         claims = [_fact(f"Claim {i}", [f"commit:abc1234:f{i}.py"], "abc1234") for i in range(10)]
         dossier = _make_dossier(sections={
             "decisions": claims,
             **{s: [] for s in ["technologies","data","components","apis","features","identity","timeline","quality"]},
         })
         seed = pick_seed(dossier, "history", asked=[])
-        assert len(seed["claims"]) <= 6
+        assert len(seed["claims"]) <= 7
+        assert len(seed["claims"]) == 7
+
+    def test_history_seed_path_evidence_first_and_up_to_7_claims(self):
+        """History seed puts claims with commit:<sha>:<path> evidence first and includes up to 7 claims."""
+        claims = [
+            _fact("Fact without path 1", ["commit:abc1234"], "abc1234"),
+            _inferred("Inferred 1", ["commit:abc1234"]),
+            _fact("Path fact 1", ["commit:abc1234:app/main.py"], "abc1234"),
+            _fact("Path fact 2", ["commit:abc1234:app/db.py"], "abc1234"),
+            _fact("Path fact 3", ["commit:abc1234:app/models.py"], "abc1234"),
+            _fact("Fact without path 2", ["commit:abc1234"], "abc1234"),
+            _inferred("Inferred 2", ["commit:abc1234"]),
+            _fact("Fact without path 3", ["commit:abc1234"], "abc1234"),
+            _inferred("Inferred 3", ["commit:abc1234"]),
+            _fact("Fact without path 4", ["commit:abc1234"], "abc1234"),
+        ]
+        dossier = _make_dossier(sections={
+            "decisions": claims,
+            **{s: [] for s in ["technologies","data","components","apis","features","identity","timeline","quality"]},
+        })
+        seed = pick_seed(dossier, "history", asked=[], commit="abc1234")
+        assert len(seed["claims"]) == 7
+        assert seed["claims"][0]["claim"] == "Path fact 1"
+        assert seed["claims"][1]["claim"] == "Path fact 2"
+        assert seed["claims"][2]["claim"] == "Path fact 3"
+
+    def test_inferred_claim_restating_commit_message_is_dropped(self):
+        """An inferred claim that restates the commit message (>60% 4+ letter words) is dropped."""
+        commit_msg_claim = _fact(
+            "Added PostgreSQL database support for user authentication and session management",
+            ["commit:abc1234:app/db.py"],
+            "abc1234",
+        )
+        restating_claim = _inferred(
+            "Added PostgreSQL database support for user authentication",
+            ["commit:abc1234"],
+        )
+        non_restating_claim = _inferred(
+            "Configured redis caching layer for background workers",
+            ["commit:abc1234"],
+        )
+        claims = [commit_msg_claim, restating_claim, non_restating_claim]
+        dossier = _make_dossier(sections={
+            "decisions": claims,
+            **{s: [] for s in ["technologies","data","components","apis","features","identity","timeline","quality"]},
+        })
+        seed = pick_seed(dossier, "history", asked=[], commit="abc1234")
+        seed_claim_texts = [c["claim"] for c in seed["claims"]]
+        assert commit_msg_claim["claim"] in seed_claim_texts
+        assert non_restating_claim["claim"] in seed_claim_texts
+        assert restating_claim["claim"] not in seed_claim_texts
 
 
 # ---------------------------------------------------------------------------
@@ -250,16 +304,18 @@ class TestGenerateQuestion:
         assert len(result.common_mistakes) == 2
 
     @pytest.mark.asyncio
-    async def test_unknown_concept_becomes_general(self):
-        """An unrecognised concept string should be coerced to 'general'."""
-        data = _valid_llm_data(concept="made-up-concept-xyz")
+    async def test_returned_concept_outside_candidates_is_replaced_and_noted(self):
+        """A concept outside candidate concepts is replaced with candidates[0] and noted."""
+        data = _valid_llm_data(concept="provider-abstraction")
         fake_chat = AsyncMock(return_value=_make_llm_reply(data))
         db = self._db_with_dossier()
 
         result = await generate_question(
             db, "proj_test", "tech", 1, chat_fn=fake_chat, save=False
         )
-        assert result.concept == "general"
+        # MongoDB tech seed has candidates ["database-choice", "general"]
+        assert result.concept == "database-choice"
+        assert "concept replaced by code" in result.validation_notes
 
     @pytest.mark.asyncio
     async def test_valid_result_saved_to_db(self):
@@ -479,6 +535,51 @@ class TestKeyPointValidation:
         assert "the team" not in result.question.lower()
         assert fake_chat.call_count == 2
 
+    def test_candidate_concepts_supabase_and_logging(self):
+        """candidate_concepts for a seed about Supabase tables and logging returns database-choice and observability before general and never provider-abstraction."""
+        seed_text = "We set up Supabase tables for data and configured logging with log output."
+        candidates = candidate_concepts(seed_text)
+        assert "database-choice" in candidates
+        assert "observability" in candidates
+        assert "general" in candidates
+        assert "provider-abstraction" not in candidates
+        assert candidates.index("database-choice") < candidates.index("general")
+        assert candidates.index("observability") < candidates.index("general")
+
+    @pytest.mark.asyncio
+    async def test_question_with_did_you_consider_is_retried(self):
+        """The question containing 'What trade-offs did you consider' is retried once."""
+        bad_data = {
+            "question": "What trade-offs did you consider when designing the database?",
+            "concept": "database-choice",
+            "key_points": [
+                {"point": "Schema flexibility", "kind": "general", "support": None},
+                {"point": "Document store design", "kind": "general", "support": None},
+                {"point": "Scalability considerations", "kind": "general", "support": None},
+            ],
+            "common_mistakes": ["Ignoring indexing"],
+        }
+        good_data = {
+            "question": "What are the trade-offs of using MongoDB in your project?",
+            "concept": "database-choice",
+            "key_points": [
+                {"point": "Schema flexibility", "kind": "general", "support": None},
+                {"point": "Document store design", "kind": "general", "support": None},
+                {"point": "Scalability considerations", "kind": "general", "support": None},
+            ],
+            "common_mistakes": ["Ignoring indexing"],
+        }
+        fake_chat = AsyncMock(side_effect=[
+            _make_llm_reply(bad_data),
+            _make_llm_reply(good_data),
+        ])
+        db = self._db_with_single_seed()
+
+        result = await generate_question(db, "proj_test", "tech", 2, chat_fn=fake_chat, save=False)
+
+        assert "did you consider" not in result.question.lower()
+        assert fake_chat.call_count == 2
+
     @pytest.mark.asyncio
     async def test_validation_notes_saved_with_question(self):
         """validation_notes should be persisted in the DB document."""
@@ -505,7 +606,9 @@ class TestKeyPointValidation:
 
 # ---------------------------------------------------------------------------
 # Guard: no file in app/interview reads evals/questions.json
-# ---------------------------------------------------------------------------class TestNoEvalsQuestionsJsonRead:
+# ---------------------------------------------------------------------------
+
+class TestNoEvalsQuestionsJsonRead:
     def test_no_interview_file_reads_evals_questions_json(self):
         """
         Statically verify no source file under app/interview imports or opens evals/questions.json.

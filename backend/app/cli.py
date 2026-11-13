@@ -148,6 +148,9 @@ def _print_interview_result(result: "InterviewQuestion", show_seed: bool) -> Non
 
     print(f"\nQuestion: {result.question}")
     print(f"Concept:  {result.concept}  (difficulty {result.difficulty})")
+    candidates = getattr(result, "candidate_concepts", None) or (getattr(result, "seed", {}) or {}).get("candidate_concepts")
+    if candidates:
+        print(f"Candidate concepts: {', '.join(candidates)}")
     print("\nKey points:")
     for kp in result.key_points:
         if kp.kind == "repo" and kp.support is not None:

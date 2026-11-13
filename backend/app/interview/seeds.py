@@ -7,6 +7,7 @@ No LLM calls happen here — this is pure dossier analysis.
 from __future__ import annotations
 
 import random
+import re
 from typing import Any
 
 from .concepts import ROUNDS
@@ -89,12 +90,12 @@ def _pick_history_seed(
         if sha:
             by_commit.setdefault(sha, []).append(claim)
 
-    # Also handle claims whose evidence includes commit:<sha7>:<path>
+    # Also handle claims whose evidence includes commit:<sha7> or commit:<sha7>:<path>
     for claim in decisions_claims:
         for eid in claim.get("evidence") or []:
             if isinstance(eid, str) and eid.startswith("commit:"):
                 parts = eid.split(":")
-                if len(parts) >= 3:
+                if len(parts) >= 2 and parts[1]:
                     sha = parts[1]
                     by_commit.setdefault(sha, [])
                     if claim not in by_commit[sha]:
@@ -151,8 +152,60 @@ def _pick_history_seed(
     return _build_history_result(chosen_sha, chosen_claims)
 
 
+def _has_path_evidence(claim: dict) -> bool:
+    for eid in claim.get("evidence") or []:
+        if isinstance(eid, str) and eid.startswith("commit:"):
+            parts = eid.split(":")
+            if len(parts) >= 3 and parts[2]:
+                return True
+    return False
+
+
+def _claim_priority(claim: dict) -> int:
+    tag = str(claim.get("tag", "")).lower()
+    if tag == "fact":
+        if _has_path_evidence(claim):
+            return 0  # fact with commit:<sha7>:<path> evidence
+        return 1      # other fact
+    if tag == "inferred":
+        return 2      # inferred
+    return 3          # other (e.g. uncertain)
+
+
+def _order_and_filter_history_claims(claims: list[dict], max_claims: int = 7) -> list[dict]:
+    # 1. Order claims: fact with path evidence, other fact, inferred, others
+    ordered = sorted(claims, key=_claim_priority)
+
+    # 2. Filter: drop an inferred claim whose text restates the commit message
+    # (more than 60% of its words, 4+ letters, also appear in an earlier claim of the seed)
+    selected: list[dict] = []
+    for c in ordered:
+        tag = str(c.get("tag", "")).lower()
+        if tag == "inferred":
+            claim_text = c.get("claim") or ""
+            words = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", claim_text)]
+            if words:
+                restate = False
+                for prev in selected:
+                    prev_text = prev.get("claim") or ""
+                    prev_words = set(w.lower() for w in re.findall(r"[a-zA-Z]{4,}", prev_text))
+                    matching_tokens = sum(1 for w in words if w in prev_words)
+                    token_ratio = matching_tokens / len(words)
+                    unique_words = set(words)
+                    unique_ratio = len(unique_words & prev_words) / len(unique_words)
+                    if token_ratio > 0.6 or unique_ratio > 0.6:
+                        restate = True
+                        break
+                if restate:
+                    continue
+        selected.append(c)
+        if len(selected) >= max_claims:
+            break
+    return selected
+
+
 def _build_history_result(sha7: str, claims: list[dict]) -> dict:
-    top = claims[:6]
+    top = _order_and_filter_history_claims(claims, max_claims=7)
     return {
         "section": "decisions",
         "claims": [
