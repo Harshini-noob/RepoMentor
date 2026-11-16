@@ -1,4 +1,4 @@
-"""Pydantic models for interview question generation."""
+"""Pydantic models for interview question generation and evaluation."""
 
 from __future__ import annotations
 
@@ -28,4 +28,43 @@ class InterviewQuestion(BaseModel):
     seed: dict
     candidate_concepts: list[str] = Field(default_factory=list)
     validation_notes: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class PointResult(BaseModel):
+    id: int
+    point: str
+    kind: Literal["repo", "general"]
+    status: Literal["covered", "partial", "missing"]
+    quote: str | None = None
+    note: str | None = None
+
+
+class Misconception(BaseModel):
+    quote: str
+    why: str
+    seed_line: int | None = None
+    contradicts_repo: bool = False
+
+
+class Evaluation(BaseModel):
+    points: list[PointResult]
+    misconceptions: list[Misconception] = Field(default_factory=list)
+    strengths: list[str] = Field(default_factory=list)
+    advice: str = ""
+    coverage: float
+    score: int = Field(..., ge=0, le=4)
+    notes: list[str] = Field(default_factory=list)
+
+
+class InterviewAttempt(BaseModel):
+    attempt_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    question_id: str
+    project_id: str
+    concept: str
+    difficulty: int
+    answer: str
+    evaluation: Evaluation
+    model: str | None = None
+    tokens: int = 0
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

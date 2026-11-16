@@ -8,7 +8,7 @@ Rules
 - Address the candidate as "you" and "your project". Never write "the team", "recent" or "recently".
 - Do not say that anyone considered, decided or planned something unless a seed line says so; ask what the trade-offs of the change are.
 - Ask what the trade-offs of the change are and what alternatives exist; do not write 'you considered', 'you decided' or 'you evaluated'.
-- Rubric: 3 to 5 key points a good answer contains. Mark each "repo" only when a seed line explicitly states it, and give support = the 1-based number of that seed line. Everything else is "general" with support = null. Never state a latency, speed, cost, scale or reliability effect as "repo" unless a seed line says that effect. Add 2 common mistakes.
+- Rubric: Key points are what a good ANSWER SAYS, not facts to recite. Give 4 key points (never more than 5). For difficulty 3 or higher at least 2 key points must be kind 'general' ideas that directly answer what the question asks: trade-offs, alternatives, failure modes, scale or redesign. 'repo' points (at most 2) are project facts the candidate should be able to cite as evidence; each states one seed line and its support is that line's number. Give 2 common mistakes: wrong or shallow answers a candidate might give to THIS question, not general advice.
 - A 'repo' key point states exactly one seed line and nothing more: any consequence, effect or opinion goes into a separate 'general' key point.
 - Choose the concept from the allowed list.
 Return ONLY a JSON object: {"question": str, "concept": str, "key_points": [{"point": str, "kind": "repo" or "general", "support": int or null}], "common_mistakes": [str]}

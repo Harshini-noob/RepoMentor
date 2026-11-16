@@ -3,9 +3,11 @@ RepoMentor Agent CLI:
 Usage: python -m app.cli ask <project_id> "<question>"
        python -m app.cli chat <project_id> [--session <id>]
        python -m app.cli interview-question <project_id> --round <name> --difficulty <int> [--commit <sha>] [--dry-run] [--show-seed]
+       python -m app.cli interview-answer <project_id> [--question <id> | --last] [--answer "text"] [--dry-run]
 """
 
 import asyncio
+import inspect
 import logging
 import os
 import sys
@@ -14,7 +16,9 @@ from typing import Any, Callable
 from app.agent.loop import run_agent
 from app.agent.state import AgentRun, TraceStep
 from app.core.db import get_db
+from app.interview.evaluate import InterviewEvaluationError, evaluate_answer
 from app.interview.generate import InterviewGenerationError, generate_question
+from app.interview.schema import InterviewAttempt, InterviewQuestion
 from app.mentor.chat import ask
 from app.mentor.sessions import create_session, get_session
 
@@ -23,6 +27,7 @@ def print_usage() -> None:
     print('Usage: python -m app.cli ask <project_id> "<question>"')
     print('       python -m app.cli chat <project_id> [--session <id>]')
     print('       python -m app.cli interview-question <project_id> --round <name> --difficulty <int> [--commit <sha>] [--dry-run] [--show-seed]')
+    print('       python -m app.cli interview-answer <project_id> [--question <id> | --last] [--answer "text"] [--dry-run]')
     print('Example: python -m app.cli ask proj_123 "What dependencies does this project use?"')
     print('         python -m app.cli chat proj_123')
 
@@ -165,6 +170,51 @@ def _print_interview_result(result: "InterviewQuestion", show_seed: bool) -> Non
         print("\nValidation notes:")
         for vn in result.validation_notes:
             print(f"  {vn}")
+        if "rubric does not cover the question" in result.validation_notes:
+            print("WARNING: rubric does not cover the question; regenerate")
+
+    print(f"\nQuestion ID: {result.question_id}")
+    print(f"answer it with: interview-answer {result.project_id} --last")
+
+
+def _print_evaluation_result(attempt: "InterviewAttempt") -> None:
+    ev = attempt.evaluation
+    cov_pct = int(round(ev.coverage * 100))
+    print(f"\nScore: {ev.score}/4 ({cov_pct}% coverage)")
+
+    print("\nRubric points:")
+    for p in ev.points:
+        quote_part = f' (quote: "{p.quote}")' if p.quote else ""
+        note_part = f" [{p.note}]" if p.note else ""
+        print(f"  [{p.id}] [{p.status}] [{p.kind}] {p.point}{quote_part}{note_part}")
+
+    missed = [p for p in ev.points if p.status in ("missing", "partial")]
+    if missed:
+        print("\nWhat was missed:")
+        for p in missed:
+            print(f"  [{p.status}] [{p.kind}] {p.point}")
+
+    if ev.misconceptions:
+        print("\nMisconceptions:")
+        for m in ev.misconceptions:
+            contra = f" (contradicts repo seed line {m.seed_line})" if m.seed_line is not None else ""
+            print(f'  - "{m.quote}": {m.why}{contra}')
+
+    if ev.strengths:
+        print("\nStrengths:")
+        for s in ev.strengths:
+            print(f"  - {s}")
+
+    if ev.advice:
+        print(f"\nAdvice:\n  {ev.advice}")
+
+    if ev.notes:
+        print("\nNotes:")
+        for n in ev.notes:
+            print(f"  - {n}")
+
+    if attempt.tokens:
+        print(f"\nTokens used: {attempt.tokens}")
 
 
 def main() -> None:
@@ -280,6 +330,123 @@ def main() -> None:
             sys.exit(2)
         except Exception as exc:
             print(f"Generation error: {exc}", file=sys.stderr)
+            sys.exit(2)
+
+    elif cmd == "interview-answer":
+        if len(args) < 2:
+            print_usage()
+            sys.exit(1)
+
+        project_id = args[1]
+        question_id: str | None = None
+        use_last = False
+        answer_text: str | None = None
+        dry_run = False
+        i = 2
+
+        try:
+            while i < len(args):
+                flag = args[i]
+                if flag == "--question":
+                    if i + 1 >= len(args):
+                        print("Error: --question requires an argument", file=sys.stderr)
+                        print_usage()
+                        sys.exit(1)
+                    question_id = args[i + 1]
+                    i += 2
+                elif flag.startswith("--question="):
+                    question_id = flag.split("=", 1)[1]
+                    i += 1
+                elif flag == "--last":
+                    use_last = True
+                    i += 1
+                elif flag == "--answer":
+                    if i + 1 >= len(args):
+                        print("Error: --answer requires an argument", file=sys.stderr)
+                        print_usage()
+                        sys.exit(1)
+                    answer_text = args[i + 1]
+                    i += 2
+                elif flag.startswith("--answer="):
+                    answer_text = flag.split("=", 1)[1]
+                    i += 1
+                elif flag == "--dry-run":
+                    dry_run = True
+                    i += 1
+                else:
+                    print(f"Error: unknown argument: {flag}", file=sys.stderr)
+                    print_usage()
+                    sys.exit(1)
+        except Exception:
+            print_usage()
+            sys.exit(1)
+
+        if not question_id and not use_last:
+            print("Error: either --question <id> or --last is required", file=sys.stderr)
+            print_usage()
+            sys.exit(1)
+
+        try:
+            async def _run_eval() -> None:
+                database = get_db()
+                target_qid = question_id
+                target_doc = None
+                if use_last:
+                    cursor = database.interview_questions.find({"project_id": project_id}).sort("created_at", -1)
+                    if hasattr(cursor, "to_list"):
+                        docs = await cursor.to_list(1)
+                    elif inspect.isawaitable(cursor):
+                        cur = await cursor
+                        docs = list(cur)
+                    else:
+                        docs = list(cursor)
+                    if not docs:
+                        print(f"Error: No interview questions found for project {project_id}", file=sys.stderr)
+                        sys.exit(1)
+                    target_doc = docs[0]
+                    target_qid = target_doc.get("question_id")
+                else:
+                    find_res = database.interview_questions.find_one({"question_id": target_qid})
+                    if inspect.isawaitable(find_res):
+                        target_doc = await find_res
+                    else:
+                        target_doc = find_res
+                    if not target_doc:
+                        print(f"Error: Question not found: {target_qid}", file=sys.stderr)
+                        sys.exit(1)
+
+                candidate_ans = answer_text
+                if candidate_ans is None:
+                    print(f"\nQuestion: {target_doc.get('question')}\n")
+                    print("Type your answer below. End with a line containing only '.' or EOF:")
+                    lines = []
+                    try:
+                        for line in sys.stdin:
+                            if line.strip() == ".":
+                                break
+                            lines.append(line)
+                    except EOFError:
+                        pass
+                    candidate_ans = "".join(lines).strip()
+
+                attempt = await evaluate_answer(
+                    database,
+                    question_id=target_qid,
+                    answer=candidate_ans,
+                    save=not dry_run,
+                )
+                _print_evaluation_result(attempt)
+
+            asyncio.run(_run_eval())
+            sys.exit(0)
+        except KeyboardInterrupt:
+            print("Interrupted during interview evaluation.", file=sys.stderr)
+            sys.exit(130)
+        except InterviewEvaluationError as exc:
+            print(f"Evaluation error: {exc}", file=sys.stderr)
+            sys.exit(2)
+        except Exception as exc:
+            print(f"Evaluation error: {exc}", file=sys.stderr)
             sys.exit(2)
 
     elif cmd == "chat":

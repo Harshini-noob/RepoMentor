@@ -603,6 +603,230 @@ class TestKeyPointValidation:
         assert isinstance(saved.get("validation_notes"), list)
         assert len(saved["validation_notes"]) > 0
 
+    @pytest.mark.asyncio
+    async def test_six_key_points_trimmed_to_five_repo_first(self):
+        """6 key points are trimmed to 5 with repo points kept first and note saved."""
+        data = {
+            "question": "Why did you use MongoDB in your project?",
+            "concept": "database-choice",
+            "key_points": [
+                {"point": "General point 1", "kind": "general", "support": None},
+                {"point": "MongoDB database document storage format", "kind": "repo", "support": 1},
+                {"point": "General point 2", "kind": "general", "support": None},
+                {"point": "General point 3", "kind": "general", "support": None},
+                {"point": "General point 4", "kind": "general", "support": None},
+                {"point": "General point 5", "kind": "general", "support": None},
+            ],
+            "common_mistakes": ["Mistake 1", "Mistake 2"],
+        }
+        fake_chat = AsyncMock(return_value=_make_llm_reply(data))
+        db = self._db_with_single_seed()
+
+        result = await generate_question(db, "proj_test", "tech", 2, chat_fn=fake_chat, save=False)
+
+        assert len(result.key_points) == 5
+        # Validated repo point kept first
+        assert result.key_points[0].kind == "repo"
+        assert result.key_points[0].point == "MongoDB database document storage format"
+        # Remaining 4 are the first 4 general points in original order
+        assert [kp.point for kp in result.key_points[1:]] == [
+            "General point 1", "General point 2", "General point 3", "General point 4"
+        ]
+        assert "trimmed key points from 6 to 5" in result.validation_notes
+
+    @pytest.mark.asyncio
+    async def test_two_key_points_trigger_retry_that_succeeds(self):
+        """2 key points trigger one retry that then succeeds."""
+        bad_data = {
+            "question": "Why did you use MongoDB in your project?",
+            "concept": "database-choice",
+            "key_points": [
+                {"point": "General point 1", "kind": "general", "support": None},
+                {"point": "General point 2", "kind": "general", "support": None},
+            ],
+            "common_mistakes": ["Mistake 1", "Mistake 2"],
+        }
+        good_data = {
+            "question": "Why did you use MongoDB in your project?",
+            "concept": "database-choice",
+            "key_points": [
+                {"point": "General point 1", "kind": "general", "support": None},
+                {"point": "General point 2", "kind": "general", "support": None},
+                {"point": "General point 3", "kind": "general", "support": None},
+            ],
+            "common_mistakes": ["Mistake 1", "Mistake 2"],
+        }
+        fake_chat = AsyncMock(side_effect=[
+            _make_llm_reply(bad_data),
+            _make_llm_reply(good_data),
+        ])
+        db = self._db_with_single_seed()
+
+        result = await generate_question(db, "proj_test", "tech", 2, chat_fn=fake_chat, save=False)
+
+        assert fake_chat.call_count == 2
+        assert len(result.key_points) == 3
+
+    @pytest.mark.asyncio
+    async def test_two_key_points_on_both_attempts_raises_error(self):
+        """2 key points on both attempts raise InterviewGenerationError."""
+        bad_data = {
+            "question": "Why did you use MongoDB in your project?",
+            "concept": "database-choice",
+            "key_points": [
+                {"point": "General point 1", "kind": "general", "support": None},
+                {"point": "General point 2", "kind": "general", "support": None},
+            ],
+            "common_mistakes": ["Mistake 1", "Mistake 2"],
+        }
+        fake_chat = AsyncMock(side_effect=[
+            _make_llm_reply(bad_data),
+            _make_llm_reply(bad_data),
+        ])
+        db = self._db_with_single_seed()
+
+        with pytest.raises(InterviewGenerationError, match="key_points"):
+            await generate_question(db, "proj_test", "tech", 2, chat_fn=fake_chat, save=False)
+
+        assert fake_chat.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_four_common_mistakes_trimmed_to_three(self):
+        """4 common mistakes are trimmed to 3 with note."""
+        data = {
+            "question": "Why did you use MongoDB in your project?",
+            "concept": "database-choice",
+            "key_points": [
+                {"point": "General point 1", "kind": "general", "support": None},
+                {"point": "General point 2", "kind": "general", "support": None},
+                {"point": "General point 3", "kind": "general", "support": None},
+            ],
+            "common_mistakes": ["Mistake 1", "Mistake 2", "Mistake 3", "Mistake 4"],
+        }
+        fake_chat = AsyncMock(return_value=_make_llm_reply(data))
+        db = self._db_with_single_seed()
+
+        result = await generate_question(db, "proj_test", "tech", 2, chat_fn=fake_chat, save=False)
+
+        assert len(result.common_mistakes) == 3
+        assert result.common_mistakes == ["Mistake 1", "Mistake 2", "Mistake 3"]
+        assert "trimmed common mistakes from 4 to 3" in result.validation_notes
+
+    @pytest.mark.asyncio
+    async def test_difficulty_3_with_3_repo_1_general_triggers_retry_and_accepts_2_general(self):
+        """A rubric of 3 repo points and 1 general at difficulty 3 triggers one retry; second rubric with 2 general points is accepted."""
+        bad_data = {
+            "question": "What are the trade-offs of using MongoDB in your project?",
+            "concept": "database-choice",
+            "key_points": [
+                {"point": "MongoDB database is used for document storage", "kind": "repo", "support": 1},
+                {"point": "Uses MongoDB database document model", "kind": "repo", "support": 1},
+                {"point": "Document storage format in MongoDB database", "kind": "repo", "support": 1},
+                {"point": "Schema flexibility allows rapid iteration", "kind": "general", "support": None},
+            ],
+            "common_mistakes": ["Mistake 1", "Mistake 2"],
+        }
+        good_data = {
+            "question": "What are the trade-offs of using MongoDB in your project?",
+            "concept": "database-choice",
+            "key_points": [
+                {"point": "MongoDB database is used for document storage", "kind": "repo", "support": 1},
+                {"point": "Uses MongoDB database document model", "kind": "repo", "support": 1},
+                {"point": "Schema flexibility allows rapid iteration", "kind": "general", "support": None},
+                {"point": "Document model trades relational integrity for query speed", "kind": "general", "support": None},
+            ],
+            "common_mistakes": ["Mistake 1", "Mistake 2"],
+        }
+        fake_chat = AsyncMock(side_effect=[
+            _make_llm_reply(bad_data),
+            _make_llm_reply(good_data),
+        ])
+        db = self._db_with_single_seed()
+
+        result = await generate_question(db, "proj_test", "tech", 3, chat_fn=fake_chat, save=False)
+
+        assert fake_chat.call_count == 2
+        general_pts = [kp for kp in result.key_points if kp.kind == "general"]
+        assert len(general_pts) == 2
+        assert "rubric does not cover the question" not in result.validation_notes
+
+    @pytest.mark.asyncio
+    async def test_difficulty_3_second_failure_saves_with_note(self):
+        """After a second failure at difficulty 3, the question is saved anyway with the note."""
+        bad_data = {
+            "question": "What are the trade-offs of using MongoDB in your project?",
+            "concept": "database-choice",
+            "key_points": [
+                {"point": "MongoDB database is used for document storage", "kind": "repo", "support": 1},
+                {"point": "Uses MongoDB database document model", "kind": "repo", "support": 1},
+                {"point": "Document storage format in MongoDB database", "kind": "repo", "support": 1},
+                {"point": "Schema flexibility allows rapid iteration", "kind": "general", "support": None},
+            ],
+            "common_mistakes": ["Mistake 1", "Mistake 2"],
+        }
+        fake_chat = AsyncMock(side_effect=[
+            _make_llm_reply(bad_data),
+            _make_llm_reply(bad_data),
+        ])
+        db = self._db_with_single_seed()
+
+        result = await generate_question(db, "proj_test", "tech", 3, chat_fn=fake_chat, save=True)
+
+        assert fake_chat.call_count == 2
+        assert "rubric does not cover the question" in result.validation_notes
+        saved = db.interview_questions.find_one({"question_id": result.question_id})
+        assert saved is not None
+        assert "rubric does not cover the question" in saved["validation_notes"]
+
+    @pytest.mark.asyncio
+    async def test_trimming_6_points_keeps_2_generals_at_difficulty_3(self):
+        """Trimming 6 points keeps 2 generals at difficulty 3 (dropping surplus repo points first)."""
+        data = {
+            "question": "What are the trade-offs of using MongoDB in your project?",
+            "concept": "database-choice",
+            "key_points": [
+                {"point": "MongoDB database is used for document storage", "kind": "repo", "support": 1},
+                {"point": "Uses MongoDB database document model", "kind": "repo", "support": 1},
+                {"point": "Document storage format in MongoDB database", "kind": "repo", "support": 1},
+                {"point": "Main database storage using MongoDB", "kind": "repo", "support": 1},
+                {"point": "General point 1: trade-offs in scaling", "kind": "general", "support": None},
+                {"point": "General point 2: alternative database solutions", "kind": "general", "support": None},
+            ],
+            "common_mistakes": ["Mistake 1", "Mistake 2"],
+        }
+        fake_chat = AsyncMock(return_value=_make_llm_reply(data))
+        db = self._db_with_single_seed()
+
+        result = await generate_question(db, "proj_test", "tech", 3, chat_fn=fake_chat, save=False)
+
+        assert len(result.key_points) == 5
+        general_pts = [kp for kp in result.key_points if kp.kind == "general"]
+        repo_pts = [kp for kp in result.key_points if kp.kind == "repo"]
+        assert len(general_pts) == 2
+        assert len(repo_pts) == 3
+        assert "trimmed key points from 6 to 5" in result.validation_notes
+
+    @pytest.mark.asyncio
+    async def test_difficulty_1_no_general_points_required(self):
+        """At difficulty 1, no general points are required (no retry, accepted as is)."""
+        data = {
+            "question": "What does MongoDB do in your project?",
+            "concept": "database-choice",
+            "key_points": [
+                {"point": "MongoDB database is used for document storage", "kind": "repo", "support": 1},
+                {"point": "Uses MongoDB database document model", "kind": "repo", "support": 1},
+                {"point": "Document storage format in MongoDB database", "kind": "repo", "support": 1},
+            ],
+            "common_mistakes": ["Mistake 1", "Mistake 2"],
+        }
+        fake_chat = AsyncMock(return_value=_make_llm_reply(data))
+        db = self._db_with_single_seed()
+
+        result = await generate_question(db, "proj_test", "tech", 1, chat_fn=fake_chat, save=False)
+
+        assert fake_chat.call_count == 1
+        assert "rubric does not cover the question" not in result.validation_notes
+
 
 # ---------------------------------------------------------------------------
 # Guard: no file in app/interview reads evals/questions.json

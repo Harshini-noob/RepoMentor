@@ -250,6 +250,117 @@ async def generate_question(
     )
     validation_notes.extend(kp_notes)
 
+    # 10b. Key points count handling:
+    # If fewer than 3, retry once with "Give 3 to 5 key points." and fail if still < 3
+    if len(key_points) < 3:
+        logger.warning("Fewer than 3 key points (%d) — retrying once.", len(key_points))
+        messages_kp = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": reply.content or ""},
+            {"role": "user", "content": "Give 3 to 5 key points."},
+        ]
+        reply_kp: LLMReply = await _chat(messages_kp, tools=None)
+        data_kp, parse_ok_kp = _parse_json(reply_kp.content or "")
+        if not parse_ok_kp:
+            raise InterviewGenerationError("LLM did not return valid JSON after retry for key points.")
+        _validate_structure(data_kp)
+        data = data_kp
+        reply = reply_kp
+        if data.get("concept") not in candidates:
+            data["concept"] = candidates[0]
+            if "concept replaced by code" not in validation_notes:
+                validation_notes.append("concept replaced by code")
+        key_points, retry_kp_notes = _validate_key_points(data.get("key_points", []), seed_claims)
+        validation_notes.extend(retry_kp_notes)
+        if len(key_points) < 3:
+            raise InterviewGenerationError(
+                f"Expected 3–5 key_points, got {len(key_points)} after retry."
+            )
+
+    # 10c. Rubric check for difficulty >= 3: at least 2 general key points
+    if difficulty >= 3 and sum(1 for kp in key_points if kp.kind == "general") < 2:
+        logger.warning(
+            "Difficulty %d requires >= 2 general key points (got %d) — retrying once.",
+            difficulty, sum(1 for kp in key_points if kp.kind == "general"),
+        )
+        messages_rubric = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": reply.content or ""},
+            {
+                "role": "user",
+                "content": (
+                    "The rubric lists facts but not what a good answer says. "
+                    "Add general key points that answer the question (trade-offs, "
+                    "alternatives, failure modes) and keep at most 2 repo points."
+                ),
+            },
+        ]
+        reply_rubric: LLMReply = await _chat(messages_rubric, tools=None)
+        data_rubric, parse_ok_rubric = _parse_json(reply_rubric.content or "")
+        if parse_ok_rubric:
+            _validate_structure(data_rubric)
+            data = data_rubric
+            reply = reply_rubric
+            if data.get("concept") not in candidates:
+                data["concept"] = candidates[0]
+                if "concept replaced by code" not in validation_notes:
+                    validation_notes.append("concept replaced by code")
+            key_points, retry_rubric_kp_notes = _validate_key_points(
+                data.get("key_points", []), seed_claims
+            )
+            validation_notes.extend(retry_rubric_kp_notes)
+
+        # If it is still below 2 after the retry, save the question anyway with the validation note
+        if sum(1 for kp in key_points if kp.kind == "general") < 2:
+            validation_notes.append("rubric does not cover the question")
+
+    # If there are more than 5 key points keep at most 5:
+    # When trimming to 5 key points, keep at least 2 general points for difficulty >= 3 (drop surplus repo points first)
+    if len(key_points) > 5:
+        initial_kps_len = len(key_points)
+        repo_points = [kp for kp in key_points if kp.kind == "repo"]
+        general_points = [kp for kp in key_points if kp.kind != "repo"]
+        if difficulty >= 3:
+            min_general = min(2, len(general_points))
+            max_repo = 5 - min_general
+            kept_repo = repo_points[:max_repo]
+            slots_for_general = 5 - len(kept_repo)
+            kept_general = general_points[:slots_for_general]
+            key_points = kept_repo + kept_general
+        else:
+            key_points = (repo_points + general_points)[:5]
+        validation_notes.append(f"trimmed key points from {initial_kps_len} to 5")
+
+    # 10c. Common mistakes count handling:
+    # Retry once when there are none
+    common_mistakes = list(data.get("common_mistakes") or [])
+    if len(common_mistakes) == 0:
+        logger.warning("No common mistakes — retrying once.")
+        messages_cm = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": reply.content or ""},
+            {"role": "user", "content": "Give 2 common mistakes."},
+        ]
+        reply_cm: LLMReply = await _chat(messages_cm, tools=None)
+        data_cm, parse_ok_cm = _parse_json(reply_cm.content or "")
+        if not parse_ok_cm:
+            raise InterviewGenerationError("LLM did not return valid JSON after retry for common mistakes.")
+        _validate_structure(data_cm)
+        data = data_cm
+        reply = reply_cm
+        common_mistakes = list(data.get("common_mistakes") or [])
+        if len(common_mistakes) == 0:
+            raise InterviewGenerationError("LLM response missing 'common_mistakes' after retry.")
+
+    # Keep the first 3 when there are more (with a note)
+    if len(common_mistakes) > 3:
+        initial_cm_len = len(common_mistakes)
+        common_mistakes = common_mistakes[:3]
+        validation_notes.append(f"trimmed common mistakes from {initial_cm_len} to 3")
+
     # 11. Build model
     iq = InterviewQuestion(
         project_id=project_id,
@@ -258,7 +369,7 @@ async def generate_question(
         concept=data["concept"],
         question=data["question"],
         key_points=key_points,
-        common_mistakes=data.get("common_mistakes", []),
+        common_mistakes=common_mistakes,
         seed=seed,
         candidate_concepts=candidates,
         validation_notes=validation_notes,
@@ -295,16 +406,13 @@ def _parse_json(text: str) -> tuple[dict, bool]:
 
 
 def _validate_structure(data: dict) -> None:
-    """Raise InterviewGenerationError if required fields are missing or out of range."""
+    """Raise InterviewGenerationError if required fields are missing."""
     if not data.get("question"):
         raise InterviewGenerationError("LLM response missing 'question' field.")
-    kps = data.get("key_points") or []
-    if not (3 <= len(kps) <= 5):
-        raise InterviewGenerationError(
-            f"Expected 3–5 key_points, got {len(kps)}."
-        )
-    if not data.get("common_mistakes"):
-        raise InterviewGenerationError("LLM response missing 'common_mistakes'.")
+    if "key_points" not in data or not isinstance(data.get("key_points"), list):
+        raise InterviewGenerationError("LLM response missing 'key_points' field.")
+    if "common_mistakes" not in data or not isinstance(data.get("common_mistakes"), list):
+        raise InterviewGenerationError("LLM response missing 'common_mistakes' field.")
 
 
 def _check_banned_phrases(question: str) -> list[str]:
