@@ -3,6 +3,13 @@ from app.interview.evaluate import (
     evaluate_answer,
 )
 from app.interview.generate import InterviewGenerationError, generate_question
+from app.interview.profile import (
+    get_profile,
+    next_difficulty,
+    rebuild,
+    update_from_attempt,
+    weak_concepts,
+)
 from app.interview.runner import print_interview_summary, run_interview
 from app.interview.schema import (
     Evaluation,
@@ -11,6 +18,7 @@ from app.interview.schema import (
     KeyPoint,
     Misconception,
     PointResult,
+    UnverifiedClaim,
 )
 from app.interview.scoring import score_evaluation
 from app.interview.session import (
@@ -34,6 +42,7 @@ __all__ = [
     "KeyPoint",
     "PointResult",
     "Misconception",
+    "UnverifiedClaim",
     "create_session",
     "get_session",
     "record_item",
@@ -42,4 +51,9 @@ __all__ = [
     "build_summary",
     "run_interview",
     "print_interview_summary",
+    "update_from_attempt",
+    "rebuild",
+    "get_profile",
+    "weak_concepts",
+    "next_difficulty",
 ]

@@ -47,9 +47,18 @@ class Misconception(BaseModel):
     contradicts_repo: bool = False
 
 
+class UnverifiedClaim(BaseModel):
+    quote: str
+    why: str
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+
 class Evaluation(BaseModel):
     points: list[PointResult]
     misconceptions: list[Misconception] = Field(default_factory=list)
+    unverified: list[UnverifiedClaim] = Field(default_factory=list)
     strengths: list[str] = Field(default_factory=list)
     advice: str = ""
     coverage: float

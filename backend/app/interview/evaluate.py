@@ -21,6 +21,7 @@ from app.interview.schema import (
     InterviewAttempt,
     Misconception,
     PointResult,
+    UnverifiedClaim,
 )
 from app.interview.scoring import score_evaluation
 
@@ -124,6 +125,7 @@ async def evaluate_answer(
         ev = Evaluation(
             points=points,
             misconceptions=[],
+            unverified=[],
             strengths=[],
             advice="Answer in a few full sentences.",
             coverage=0.0,
@@ -284,6 +286,19 @@ async def evaluate_answer(
             )
         )
 
+    # Validate unverified statements (up to 3, dropped if quote not in answer)
+    unverified: list[UnverifiedClaim] = []
+    for u in data.get("unverified", []):
+        if not isinstance(u, dict):
+            continue
+        u_quote = u.get("quote")
+        if not _quote_in_answer(u_quote, norm_answer):
+            continue
+        why = str(u.get("why", "") or "")
+        unverified.append(UnverifiedClaim(quote=u_quote, why=why))
+        if len(unverified) >= 3:
+            break
+
     strengths = [s for s in data.get("strengths", []) if isinstance(s, str)][:2]
     advice = str(data.get("advice", "") or "")
 
@@ -293,6 +308,7 @@ async def evaluate_answer(
     evaluation = Evaluation(
         points=point_results,
         misconceptions=misconceptions,
+        unverified=unverified,
         strengths=strengths,
         advice=advice,
         coverage=coverage,
@@ -317,10 +333,18 @@ async def evaluate_answer(
         session_id=session_id,
     )
 
-    # 8. Persist attempt
+    # 8. Persist attempt and update learner profile
     if save:
         insert_coro = db.interview_attempts.insert_one(attempt.model_dump(mode="json"))
         if inspect.isawaitable(insert_coro):
             await insert_coro
+        # Update learner profile — a failure must never raise
+        try:
+            from app.interview.profile import update_from_attempt as _update_profile
+            profile_coro = _update_profile(db, attempt)
+            if inspect.isawaitable(profile_coro):
+                await profile_coro
+        except Exception as _profile_exc:  # noqa: BLE001
+            logger.warning("Profile update failed (ignored): %s", _profile_exc)
 
     return attempt

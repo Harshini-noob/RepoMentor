@@ -202,6 +202,14 @@ async def run_interview(
         score = _get_val(ev, "score") if ev else None
         out(f"\nScore: {score}/4")
 
+        unverified = _get_val(ev, "unverified") or []
+        if unverified:
+            out("\nCheck these against your repo:")
+            for u in unverified:
+                u_q = _get_val(u, "quote")
+                u_w = _get_val(u, "why")
+                out(f'  - "{u_q}": {u_w}')
+
         pts = _get_val(ev, "points") or []
         missed = [p for p in pts if _get_val(p, "status") in ("missing", "partial")]
         if missed:

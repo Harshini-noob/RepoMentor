@@ -231,13 +231,122 @@ _TECH_EVIDENCE_PREFIXES = (
     "fact:ui_app:",
 )
 
+_FILE_REGEX = re.compile(r"\b[\w/.-]+\.(?:py|js|ts|md|toml|ya?ml|json)\b", re.IGNORECASE)
+_BACKTICK_REGEX = re.compile(r"`([^`]+)`")
+_UNDERSCORE_REGEX = re.compile(r"\b[A-Za-z0-9]+_[A-Za-z0-9_]*\b")
+
+
+def _extract_entity_tokens(claim: dict) -> set[str]:
+    """Extract entity tokens from claim text and evidence ids."""
+    text = (claim.get("claim") or "") + " " + " ".join(claim.get("evidence") or [])
+    tokens: set[str] = set()
+
+    # File names and stem without extension
+    for m in _FILE_REGEX.finditer(text):
+        fname = m.group(0)
+        tokens.add(fname)
+        base = fname.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        stem = base.rsplit(".", 1)[0]
+        if stem:
+            tokens.add(stem)
+
+    # Identifiers in backticks
+    for m in _BACKTICK_REGEX.finditer(text):
+        tokens.add(m.group(1))
+
+    # Identifiers with an underscore
+    for m in _UNDERSCORE_REGEX.finditer(text):
+        tokens.add(m.group(0))
+
+    # Name at the end of fact:<kind>:<name> ids
+    for eid in claim.get("evidence") or []:
+        if isinstance(eid, str) and eid.startswith("fact:"):
+            parts = eid.split(":")
+            if len(parts) >= 3 and parts[-1]:
+                tokens.add(parts[-1])
+
+    # Lowercase them; drop tokens shorter than 4 characters
+    return {t.lower() for t in tokens if len(t) >= 4}
+
+
+def _score_and_find_related_claims(
+    main_claim: dict,
+    sections: dict[str, list[dict]],
+) -> list[dict]:
+    """Search claims of ALL dossier sections and return top related claims."""
+    entity_tokens = _extract_entity_tokens(main_claim)
+    if not entity_tokens:
+        return []
+
+    candidate_related: list[tuple[dict, int]] = []
+    main_text = main_claim.get("claim", "")
+
+    for sec_name, sec_claims in sections.items():
+        for c in sec_claims:
+            if c is main_claim or c.get("claim") == main_text:
+                continue
+            tag = str(c.get("tag", "")).lower()
+            if tag not in ("fact", "inferred"):
+                continue
+
+            c_text = (c.get("claim") or "") + " " + " ".join(c.get("evidence") or [])
+
+            # Number of distinct entity tokens it contains (whole-word, case-insensitive)
+            matched_count = 0
+            for tok in entity_tokens:
+                if re.search(rf"\b{re.escape(tok)}\b", c_text, re.IGNORECASE):
+                    matched_count += 1
+
+            if matched_count == 0:
+                continue
+
+            score = matched_count
+            details = c.get("details") or {}
+            if details.get("commit"):
+                score += 2
+            if c.get("source") == "user":
+                score += 1
+
+            if score >= 1:
+                candidate_related.append((c, score))
+
+    # Sort by score descending
+    candidate_related.sort(key=lambda x: -x[1])
+
+    # Take top 4 with score >= 1, at most 2 per commit
+    selected: list[dict] = []
+    commit_counts: dict[str, int] = {}
+
+    for c, sc in candidate_related:
+        details = c.get("details") or {}
+        commit_sha = details.get("commit")
+        if not commit_sha:
+            # Check commit from evidence id
+            for eid in c.get("evidence") or []:
+                if isinstance(eid, str) and eid.startswith("commit:"):
+                    parts = eid.split(":")
+                    if len(parts) >= 2 and parts[1]:
+                        commit_sha = parts[1]
+                        break
+
+        if commit_sha:
+            if commit_counts.get(commit_sha, 0) >= 2:
+                continue
+            commit_counts[commit_sha] = commit_counts.get(commit_sha, 0) + 1
+
+        selected.append(c)
+        if len(selected) >= 4:
+            break
+
+    return selected
+
 
 def _pick_claim_seed(
     sections: dict[str, list[dict]],
     round_sections: list[str],
     asked: list[dict],
 ) -> dict:
-    """Pick a seed claim from tech or architecture sections."""
+    """Pick a seed claim from tech or architecture sections with related claims."""
     is_tech = set(round_sections) & {"technologies", "data"}
 
     # Collect candidate claims
@@ -247,7 +356,6 @@ def _pick_claim_seed(
             if str(claim.get("tag", "")).lower() != "fact":
                 continue
             if is_tech:
-                # Must have an evidence id starting with one of the prefixes
                 evidence = claim.get("evidence") or []
                 if not any(
                     isinstance(e, str) and e.startswith(_TECH_EVIDENCE_PREFIXES)
@@ -255,7 +363,6 @@ def _pick_claim_seed(
                 ):
                     continue
             else:
-                # Architecture: must have at least one file:... evidence id
                 evidence = claim.get("evidence") or []
                 if not any(
                     isinstance(e, str) and e.startswith("file:")
@@ -279,30 +386,24 @@ def _pick_claim_seed(
     not_asked = [(s, c) for s, c in candidates if c.get("claim") not in asked_texts]
     pool = not_asked if not_asked else candidates
 
-    chosen_sec, chosen_claim = random.choice(pool)
-    chosen_evidence = set(chosen_claim.get("evidence") or [])
+    # Compute related claims for each candidate in pool
+    pool_with_rel: list[tuple[str, dict, list[dict]]] = [
+        (s, c, _score_and_find_related_claims(c, sections))
+        for s, c in pool
+    ]
+
+    # Prefer candidates with at least 2 related claims
+    with_at_least_2 = [item for item in pool_with_rel if len(item[2]) >= 2]
+    eligible = with_at_least_2 if with_at_least_2 else pool_with_rel
+
+    # Choose randomly among top 3 by number of related claims
+    eligible.sort(key=lambda x: -len(x[2]))
+    top_pool = eligible[:3]
+
+    chosen_sec, chosen_claim, chosen_related = random.choice(top_pool)
     chosen_commit = (chosen_claim.get("details") or {}).get("commit")
 
-    # Add up to 3 related claims from any section
-    related: list[dict] = []
-    all_claims: list[tuple[str, dict]] = []
-    for sec_name, sec_claims in sections.items():
-        for c in sec_claims:
-            all_claims.append((sec_name, c))
-
-    for _, c in all_claims:
-        if c is chosen_claim or c.get("claim") == chosen_claim.get("claim"):
-            continue
-        c_evidence = set(c.get("evidence") or [])
-        c_commit = (c.get("details") or {}).get("commit")
-        shares_evidence = bool(chosen_evidence & c_evidence)
-        shares_commit = chosen_commit and c_commit and chosen_commit == c_commit
-        if shares_evidence or shares_commit:
-            related.append(c)
-        if len(related) >= 3:
-            break
-
-    seed_claims = [chosen_claim] + related
+    seed_claims = [chosen_claim] + chosen_related
     return {
         "section": chosen_sec,
         "claims": [
@@ -311,7 +412,7 @@ def _pick_claim_seed(
                 "tag": c.get("tag", "uncertain"),
                 "evidence": c.get("evidence") or [],
             }
-            for c in seed_claims[:4]
+            for c in seed_claims[:5]
         ],
         "commit": chosen_commit or None,
     }

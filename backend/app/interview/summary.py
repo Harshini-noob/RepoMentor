@@ -60,6 +60,7 @@ def build_summary(
 
     answered_count = 0
     skipped_count = 0
+    unverified_count = 0
     scores: list[int] = []
     rows: list[ItemRow] = []
 
@@ -87,10 +88,12 @@ def build_summary(
                 if concept:
                     concept_scores[concept].append(score)
 
-            # Process rubric points for revision
+            # Process rubric points for revision and count unverified
             attempt = attempts_map.get(aid) if aid else None
             if attempt:
                 ev = _get_val(attempt, "evaluation")
+                unverified_pts = _get_val(ev, "unverified") or []
+                unverified_count += len(unverified_pts)
                 pts = _get_val(ev, "points") or []
                 for p in pts:
                     p_status = _get_val(p, "status")
@@ -151,4 +154,6 @@ def build_summary(
         "concept_scores": per_concept,
         "weakest_concepts": weakest_concepts,
         "revise": revise,
+        "unverified_count": unverified_count,
+        "unverified": unverified_count,
     }

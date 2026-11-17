@@ -278,11 +278,12 @@ async def generate_question(
                 f"Expected 3–5 key_points, got {len(key_points)} after retry."
             )
 
-    # 10c. Rubric check for difficulty >= 3: at least 2 general key points
-    if difficulty >= 3 and sum(1 for kp in key_points if kp.kind == "general") < 2:
+    # 10c. Rubric check: at least 1 general key point at diff 2, at least 2 at diff >= 3
+    min_general_req = 1 if difficulty == 2 else (2 if difficulty >= 3 else 0)
+    if min_general_req > 0 and sum(1 for kp in key_points if kp.kind == "general") < min_general_req:
         logger.warning(
-            "Difficulty %d requires >= 2 general key points (got %d) — retrying once.",
-            difficulty, sum(1 for kp in key_points if kp.kind == "general"),
+            "Difficulty %d requires >= %d general key points (got %d) — retrying once.",
+            difficulty, min_general_req, sum(1 for kp in key_points if kp.kind == "general"),
         )
         messages_rubric = [
             {"role": "system", "content": _SYSTEM_PROMPT},
@@ -312,18 +313,18 @@ async def generate_question(
             )
             validation_notes.extend(retry_rubric_kp_notes)
 
-        # If it is still below 2 after the retry, save the question anyway with the validation note
-        if sum(1 for kp in key_points if kp.kind == "general") < 2:
+        # If it is still below min_general_req after the retry, save the question anyway with the validation note
+        if sum(1 for kp in key_points if kp.kind == "general") < min_general_req:
             validation_notes.append("rubric does not cover the question")
 
     # If there are more than 5 key points keep at most 5:
-    # When trimming to 5 key points, keep at least 2 general points for difficulty >= 3 (drop surplus repo points first)
+    # When trimming to 5 key points, keep at least min_general_req general points (drop surplus repo points first)
     if len(key_points) > 5:
         initial_kps_len = len(key_points)
         repo_points = [kp for kp in key_points if kp.kind == "repo"]
         general_points = [kp for kp in key_points if kp.kind != "repo"]
-        if difficulty >= 3:
-            min_general = min(2, len(general_points))
+        if min_general_req > 0:
+            min_general = min(min_general_req, len(general_points))
             max_repo = 5 - min_general
             kept_repo = repo_points[:max_repo]
             slots_for_general = 5 - len(kept_repo)
@@ -451,6 +452,32 @@ def _content_words(text: str) -> set[str]:
     }
 
 
+_FILE_REGEX = re.compile(r"\b[\w/.-]+\.(?:py|js|ts|md|toml|ya?ml|json)\b", re.IGNORECASE)
+_BACKTICK_REGEX = re.compile(r"`([^`]+)`")
+_UNDERSCORE_REGEX = re.compile(r"\b[A-Za-z0-9]+_[A-Za-z0-9_]*\b")
+
+
+def _extract_seed_repo_names(seed_claims: list[dict]) -> set[str]:
+    """Extract file names and identifiers (backticks, snake_case, CamelCase) from seed claims."""
+    seed_text = " ".join(
+        (c.get("claim") or "") + " " + " ".join(c.get("evidence") or [])
+        for c in seed_claims
+    )
+    names: set[str] = set()
+    for m in _FILE_REGEX.finditer(seed_text):
+        fname = m.group(0)
+        names.add(fname)
+        base = fname.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        names.add(base)
+    for m in _BACKTICK_REGEX.finditer(seed_text):
+        names.add(m.group(1))
+    for m in _UNDERSCORE_REGEX.finditer(seed_text):
+        names.add(m.group(0))
+    for m in re.finditer(r"\b[A-Za-z]*[a-z][A-Z][a-zA-Z0-9]*\b", seed_text):
+        names.add(m.group(0))
+    return {n for n in names if len(n) >= 3}
+
+
 def _validate_key_points(
     raw_kps: list[Any],
     seed_claims: list[dict],
@@ -461,15 +488,23 @@ def _validate_key_points(
       (b) fewer than 2 content words shared with cited seed line → general
       (c) effect words in point but not in cited seed line → general
 
+    For all 'general' key points: drop any point that mentions a file name or
+    identifier from the seed text with note "general point mentions repo names".
+
     Returns (list[KeyPoint], list[str] validation_notes).
     """
     n_seeds = len(seed_claims)
+    seed_repo_names = _extract_seed_repo_names(seed_claims)
     key_points: list[KeyPoint] = []
     notes: list[str] = []
 
     for raw in raw_kps:
         if not isinstance(raw, dict):
-            key_points.append(KeyPoint(point=str(raw), kind="general"))
+            pt = str(raw)
+            if any(re.search(rf"\b{re.escape(rn)}\b", pt, re.IGNORECASE) for rn in seed_repo_names):
+                notes.append("general point mentions repo names")
+                continue
+            key_points.append(KeyPoint(point=pt, kind="general"))
             continue
 
         point_text = raw.get("point", "")
@@ -477,7 +512,9 @@ def _validate_key_points(
         support = raw.get("support")  # may be int or None
 
         if kind != "repo":
-            # Keep as general with no checks
+            if any(re.search(rf"\b{re.escape(rn)}\b", point_text, re.IGNORECASE) for rn in seed_repo_names):
+                notes.append("general point mentions repo names")
+                continue
             key_points.append(KeyPoint(point=point_text, kind="general", support=None))
             continue
 
@@ -485,6 +522,7 @@ def _validate_key_points(
         if not isinstance(support, int) or not (1 <= support <= n_seeds):
             note = "no valid seed line"
             notes.append(f"Key point downgraded to general: {note!r} — {point_text!r}")
+            # Downgraded repo points are always kept as general (name mentions expected)
             key_points.append(KeyPoint(point=point_text, kind="general", support=None, note=note))
             continue
 
@@ -501,6 +539,7 @@ def _validate_key_points(
         if len(overlap) < 2:
             note = f"weak overlap with seed line {support}"
             notes.append(f"Key point downgraded to general: {note!r} — {point_text!r}")
+            # Downgraded repo points are always kept as general (name mentions expected)
             key_points.append(KeyPoint(point=point_text, kind="general", support=support, note=note))
             continue
 
@@ -518,6 +557,7 @@ def _validate_key_points(
         if ungrounded_effects and effect_in_point:
             note = "effect not stated in the seed"
             notes.append(f"Key point downgraded to general: {note!r} — {point_text!r}")
+            # Downgraded repo points are always kept as general (name mentions expected)
             key_points.append(KeyPoint(point=point_text, kind="general", support=support, note=note))
             continue
 

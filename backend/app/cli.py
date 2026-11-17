@@ -20,6 +20,7 @@ from app.agent.state import AgentRun, TraceStep
 from app.core.db import get_db
 from app.interview.evaluate import InterviewEvaluationError, evaluate_answer
 from app.interview.generate import InterviewGenerationError, generate_question
+from app.interview.profile import get_profile, rebuild as rebuild_profile
 from app.interview.runner import print_interview_summary, run_interview
 from app.interview.schema import InterviewAttempt, InterviewQuestion
 from app.interview.session import (
@@ -38,9 +39,11 @@ def print_usage() -> None:
     print('       python -m app.cli interview-answer <project_id> [--question <id> | --last] [--answer "text"] [--dry-run]')
     print('       python -m app.cli interview <project_id> [--questions N] [--difficulty D] [--session <id>]')
     print('       python -m app.cli interview-report <project_id> [--session <id>]')
+    print('       python -m app.cli profile <project_id> [--rebuild]')
     print('Example: python -m app.cli ask proj_123 "What dependencies does this project use?"')
     print('         python -m app.cli chat proj_123')
     print('         python -m app.cli interview proj_123 --questions 5 --difficulty 2')
+    print('         python -m app.cli profile proj_123')
 
 
 def on_event(text: str) -> None:
@@ -192,6 +195,14 @@ def _print_evaluation_result(attempt: "InterviewAttempt") -> None:
     ev = attempt.evaluation
     cov_pct = int(round(ev.coverage * 100))
     print(f"\nScore: {ev.score}/4 ({cov_pct}% coverage)")
+
+    unverified = getattr(ev, "unverified", None) or []
+    if unverified:
+        print("\nCheck these against your repo:")
+        for u in unverified:
+            u_q = getattr(u, "quote", None) or (u.get("quote") if isinstance(u, dict) else "")
+            u_w = getattr(u, "why", None) or (u.get("why") if isinstance(u, dict) else "")
+            print(f'  - "{u_q}": {u_w}')
 
     print("\nRubric points:")
     for p in ev.points:
@@ -651,6 +662,71 @@ def main() -> None:
 
         try:
             sys.exit(asyncio.run(_async_chat(project_id, session_id)))
+        except KeyboardInterrupt:
+            sys.exit(130)
+        except Exception as exc:
+            print(f"Execution error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    elif cmd == "profile":
+        if len(args) < 2:
+            print_usage()
+            sys.exit(1)
+        project_id = args[1]
+        do_rebuild = False
+        i = 2
+        while i < len(args):
+            if args[i] == "--rebuild":
+                do_rebuild = True
+                i += 1
+            else:
+                print(f"Error: unknown argument: {args[i]}", file=sys.stderr)
+                print_usage()
+                sys.exit(1)
+
+        try:
+            async def _run_profile() -> None:
+                database = get_db()
+                if do_rebuild:
+                    await rebuild_profile(database, project_id)
+
+                profile = await get_profile(database, project_id)
+                if not profile or not profile.get("concepts"):
+                    print("No attempts yet. Run an interview first.")
+                    return
+
+                concepts = profile["concepts"]
+                print(f"\n{'Concept':<30} {'Status':<10} {'Score':>6} {'Attempts':>8} {'Last Seen':<12}")
+                print("-" * 70)
+                for name, info in sorted(concepts.items()):
+                    if not isinstance(info, dict):
+                        continue
+                    status = info.get("status", "unrated")
+                    score = info.get("score", 0.0)
+                    attempts = info.get("attempts", 0)
+                    last_seen_raw = info.get("last_seen", "")
+                    last_seen = last_seen_raw[:10] if last_seen_raw else "N/A"
+                    print(f"{name:<30} {status:<10} {score:>6.1f} {attempts:>8} {last_seen:<12}")
+
+                print("\nMost missed:")
+                for name, info in sorted(concepts.items()):
+                    if not isinstance(info, dict):
+                        continue
+                    misses = info.get("misses") or []
+                    if misses:
+                        print(f"  {name}:")
+                        for m in misses[:3]:
+                            count = m.get("count", 0)
+                            point = m.get("point", "")
+                            print(f"    ({count}x) {point}")
+
+                from app.interview.profile import weak_concepts as _weak_concepts
+                weak = _weak_concepts(profile, k=3)
+                if weak:
+                    print(f"\nRevise first: {', '.join(weak)}")
+
+            asyncio.run(_run_profile())
+            sys.exit(0)
         except KeyboardInterrupt:
             sys.exit(130)
         except Exception as exc:
