@@ -2,6 +2,7 @@
 RepoMentor Agent CLI:
 Usage: python -m app.cli ask <project_id> "<question>"
        python -m app.cli chat <project_id> [--session <id>]
+       python -m app.cli teach <project_id> [--attempt <id> | --last] [--dry-run]
        python -m app.cli interview-question <project_id> --round <name> --difficulty <int> [--commit <sha>] [--dry-run] [--show-seed]
        python -m app.cli interview-answer <project_id> [--question <id> | --last] [--answer "text"] [--dry-run]
        python -m app.cli interview <project_id> [--questions N] [--difficulty D] [--session <id>]
@@ -20,6 +21,7 @@ from app.agent.state import AgentRun, TraceStep
 from app.core.db import get_db
 from app.interview.evaluate import InterviewEvaluationError, evaluate_answer
 from app.interview.generate import InterviewGenerationError, generate_question
+from app.interview.lesson import LessonGenerationError, generate_lesson
 from app.interview.profile import get_profile, rebuild as rebuild_profile
 from app.interview.runner import print_interview_summary, run_interview
 from app.interview.schema import InterviewAttempt, InterviewQuestion
@@ -35,6 +37,7 @@ from app.mentor.sessions import create_session, get_session
 def print_usage() -> None:
     print('Usage: python -m app.cli ask <project_id> "<question>"')
     print('       python -m app.cli chat <project_id> [--session <id>]')
+    print('       python -m app.cli teach <project_id> [--attempt <id> | --last] [--dry-run]')
     print('       python -m app.cli interview-question <project_id> --round <name> --difficulty <int> [--commit <sha>] [--dry-run] [--show-seed]')
     print('       python -m app.cli interview-answer <project_id> [--question <id> | --last] [--answer "text"] [--dry-run]')
     print('       python -m app.cli interview <project_id> [--questions N] [--difficulty D] [--session <id>]')
@@ -469,6 +472,86 @@ def main() -> None:
             sys.exit(2)
         except Exception as exc:
             print(f"Evaluation error: {exc}", file=sys.stderr)
+            sys.exit(2)
+
+    elif cmd == "teach":
+        if len(args) < 2:
+            print_usage()
+            sys.exit(1)
+
+        project_id = args[1]
+        attempt_id: str | None = None
+        attempt_selected = False
+        last_selected = False
+        dry_run = False
+        i = 2
+        while i < len(args):
+            flag = args[i]
+            if flag == "--attempt":
+                if i + 1 >= len(args):
+                    print("Error: --attempt requires an argument", file=sys.stderr)
+                    print_usage()
+                    sys.exit(1)
+                attempt_id = args[i + 1]
+                attempt_selected = True
+                i += 2
+            elif flag.startswith("--attempt="):
+                attempt_id = flag.split("=", 1)[1]
+                attempt_selected = True
+                i += 1
+            elif flag == "--last":
+                last_selected = True
+                i += 1
+            elif flag == "--dry-run":
+                dry_run = True
+                i += 1
+            else:
+                print(f"Error: unknown argument: {flag}", file=sys.stderr)
+                print_usage()
+                sys.exit(1)
+
+        if attempt_selected and last_selected:
+            print("Error: use either --attempt or --last, not both", file=sys.stderr)
+            print_usage()
+            sys.exit(1)
+
+        try:
+            async def _run_teach() -> None:
+                database = get_db()
+                lesson = await generate_lesson(
+                    database,
+                    attempt_id=attempt_id,
+                    project_id=project_id,
+                    save=not dry_run,
+                )
+                attempt = database.interview_attempts.find_one(
+                    {"attempt_id": lesson["attempt_id"]}, {"_id": 0}
+                )
+                if inspect.isawaitable(attempt):
+                    attempt = await attempt
+                evaluation = attempt.get("evaluation", {})
+                print(f"Concept: {lesson['concept']}")
+                print(f"Difficulty: {attempt.get('difficulty', 'unknown')}")
+                print(f"Score: {evaluation.get('score', 'unknown')}/4")
+                print(f"\n{lesson['text']}")
+                print("\nNotes:")
+                if lesson["notes"]:
+                    for note in lesson["notes"]:
+                        print(f"  - {note}")
+                else:
+                    print("  (none)")
+                print(f"\nTokens used: {lesson['tokens']}")
+
+            asyncio.run(_run_teach())
+            sys.exit(0)
+        except KeyboardInterrupt:
+            print("Interrupted during lesson generation.", file=sys.stderr)
+            sys.exit(130)
+        except LessonGenerationError as exc:
+            print(f"Lesson generation error: {exc}", file=sys.stderr)
+            sys.exit(2)
+        except Exception as exc:
+            print(f"Lesson generation error: {exc}", file=sys.stderr)
             sys.exit(2)
 
     elif cmd == "interview":
