@@ -89,6 +89,7 @@ async def evaluate_answer(
     answer: str,
     chat_fn: Callable[..., Any] | None = None,
     save: bool = True,
+    session_id: str | None = None,
 ) -> InterviewAttempt:
     """Grade a candidate's answer against the given question."""
     # 1. Load the question
@@ -138,6 +139,7 @@ async def evaluate_answer(
             evaluation=ev,
             model=None,
             tokens=0,
+            session_id=session_id,
         )
         if save:
             insert_coro = db.interview_attempts.insert_one(attempt.model_dump(mode="json"))
@@ -312,6 +314,7 @@ async def evaluate_answer(
         evaluation=evaluation,
         model=model_name,
         tokens=tokens,
+        session_id=session_id,
     )
 
     # 8. Persist attempt

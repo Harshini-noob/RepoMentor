@@ -4,6 +4,8 @@ Usage: python -m app.cli ask <project_id> "<question>"
        python -m app.cli chat <project_id> [--session <id>]
        python -m app.cli interview-question <project_id> --round <name> --difficulty <int> [--commit <sha>] [--dry-run] [--show-seed]
        python -m app.cli interview-answer <project_id> [--question <id> | --last] [--answer "text"] [--dry-run]
+       python -m app.cli interview <project_id> [--questions N] [--difficulty D] [--session <id>]
+       python -m app.cli interview-report <project_id> [--session <id>]
 """
 
 import asyncio
@@ -18,7 +20,13 @@ from app.agent.state import AgentRun, TraceStep
 from app.core.db import get_db
 from app.interview.evaluate import InterviewEvaluationError, evaluate_answer
 from app.interview.generate import InterviewGenerationError, generate_question
+from app.interview.runner import print_interview_summary, run_interview
 from app.interview.schema import InterviewAttempt, InterviewQuestion
+from app.interview.session import (
+    create_session as create_interview_session,
+    get_session as get_interview_session,
+)
+from app.interview.summary import build_summary
 from app.mentor.chat import ask
 from app.mentor.sessions import create_session, get_session
 
@@ -28,8 +36,11 @@ def print_usage() -> None:
     print('       python -m app.cli chat <project_id> [--session <id>]')
     print('       python -m app.cli interview-question <project_id> --round <name> --difficulty <int> [--commit <sha>] [--dry-run] [--show-seed]')
     print('       python -m app.cli interview-answer <project_id> [--question <id> | --last] [--answer "text"] [--dry-run]')
+    print('       python -m app.cli interview <project_id> [--questions N] [--difficulty D] [--session <id>]')
+    print('       python -m app.cli interview-report <project_id> [--session <id>]')
     print('Example: python -m app.cli ask proj_123 "What dependencies does this project use?"')
     print('         python -m app.cli chat proj_123')
+    print('         python -m app.cli interview proj_123 --questions 5 --difficulty 2')
 
 
 def on_event(text: str) -> None:
@@ -448,6 +459,173 @@ def main() -> None:
         except Exception as exc:
             print(f"Evaluation error: {exc}", file=sys.stderr)
             sys.exit(2)
+
+    elif cmd == "interview":
+        if len(args) < 2:
+            print_usage()
+            sys.exit(1)
+
+        project_id = args[1]
+        questions_n = 5
+        difficulty = 2
+        session_id: str | None = None
+        i = 2
+
+        try:
+            while i < len(args):
+                flag = args[i]
+                if flag in ("--questions", "--difficulty", "--session"):
+                    if i + 1 >= len(args):
+                        print(f"Error: {flag} requires an argument", file=sys.stderr)
+                        print_usage()
+                        sys.exit(1)
+                    value = args[i + 1]
+                    i += 2
+                    if flag == "--questions":
+                        questions_n = int(value)
+                    elif flag == "--difficulty":
+                        difficulty = int(value)
+                    else:
+                        session_id = value
+                elif flag.startswith("--questions="):
+                    questions_n = int(flag.split("=", 1)[1])
+                    i += 1
+                elif flag.startswith("--difficulty="):
+                    difficulty = int(flag.split("=", 1)[1])
+                    i += 1
+                elif flag.startswith("--session="):
+                    session_id = flag.split("=", 1)[1]
+                    i += 1
+                else:
+                    print(f"Error: unknown argument: {flag}", file=sys.stderr)
+                    print_usage()
+                    sys.exit(1)
+        except ValueError:
+            print("Error: --questions and --difficulty must be integers", file=sys.stderr)
+            print_usage()
+            sys.exit(1)
+
+        active_session_id = session_id
+        try:
+            async def _run() -> None:
+                nonlocal active_session_id
+                database = get_db()
+                if active_session_id is None:
+                    created = await create_interview_session(
+                        database, project_id, n=questions_n, base_difficulty=difficulty
+                    )
+                    active_session_id = created["session_id"]
+
+                print(f"Session ID: {active_session_id}")
+                print(f"Resume with: python -m app.cli interview {project_id} --session {active_session_id}")
+
+                await run_interview(
+                    database,
+                    project_id=project_id,
+                    n=questions_n,
+                    base_difficulty=difficulty,
+                    session_id=active_session_id,
+                )
+
+            asyncio.run(_run())
+            sys.exit(0)
+        except KeyboardInterrupt:
+            if active_session_id:
+                print(f"\nSession saved. Resume with: python -m app.cli interview {project_id} --session {active_session_id}")
+            else:
+                print("\nInterrupted during interview session.", file=sys.stderr)
+            sys.exit(130)
+        except Exception as exc:
+            print(f"Execution error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    elif cmd == "interview-report":
+        if len(args) < 2:
+            print_usage()
+            sys.exit(1)
+
+        project_id = args[1]
+        session_id: str | None = None
+        i = 2
+
+        while i < len(args):
+            flag = args[i]
+            if flag == "--session":
+                if i + 1 >= len(args):
+                    print("Error: --session requires an argument", file=sys.stderr)
+                    print_usage()
+                    sys.exit(1)
+                session_id = args[i + 1]
+                i += 2
+            elif flag.startswith("--session="):
+                session_id = flag.split("=", 1)[1]
+                i += 1
+            else:
+                print(f"Error: unknown argument: {flag}", file=sys.stderr)
+                print_usage()
+                sys.exit(1)
+
+        try:
+            async def _run_report() -> None:
+                database = get_db()
+                if session_id:
+                    session_doc = await get_interview_session(database, session_id)
+                    if session_doc is None:
+                        print(f"Error: Session '{session_id}' not found.", file=sys.stderr)
+                        sys.exit(1)
+                    if session_doc.get("project_id") != project_id:
+                        print(
+                            f"Error: Session '{session_id}' belongs to project '{session_doc.get('project_id')}', not '{project_id}'.",
+                            file=sys.stderr,
+                        )
+                        sys.exit(1)
+                else:
+                    cursor = database.interview_sessions.find({"project_id": project_id}).sort("created_at", -1)
+                    if hasattr(cursor, "to_list"):
+                        docs = await cursor.to_list(1)
+                    elif inspect.isawaitable(cursor):
+                        docs = list(await cursor)
+                    else:
+                        docs = list(cursor)
+                    if not docs:
+                        print(f"Error: No interview sessions found for project {project_id}", file=sys.stderr)
+                        sys.exit(1)
+                    session_doc = docs[0]
+
+                items = session_doc.get("items", [])
+                q_ids = [it["question_id"] for it in items if it.get("question_id")]
+                a_ids = [it["attempt_id"] for it in items if it.get("attempt_id")]
+
+                questions = []
+                if q_ids:
+                    q_cur = database.interview_questions.find({"question_id": {"$in": q_ids}})
+                    if hasattr(q_cur, "to_list"):
+                        questions = await q_cur.to_list(len(q_ids))
+                    elif inspect.isawaitable(q_cur):
+                        questions = list(await q_cur)
+                    else:
+                        questions = list(q_cur)
+
+                attempts = []
+                if a_ids:
+                    a_cur = database.interview_attempts.find({"attempt_id": {"$in": a_ids}})
+                    if hasattr(a_cur, "to_list"):
+                        attempts = await a_cur.to_list(len(a_ids))
+                    elif inspect.isawaitable(a_cur):
+                        attempts = list(await a_cur)
+                    else:
+                        attempts = list(a_cur)
+
+                summary = build_summary(items, questions, attempts)
+                print_interview_summary(summary)
+
+            asyncio.run(_run_report())
+            sys.exit(0)
+        except KeyboardInterrupt:
+            sys.exit(130)
+        except Exception as exc:
+            print(f"Execution error: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     elif cmd == "chat":
         if len(args) < 2:

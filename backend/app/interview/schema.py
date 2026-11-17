@@ -67,4 +67,5 @@ class InterviewAttempt(BaseModel):
     evaluation: Evaluation
     model: str | None = None
     tokens: int = 0
+    session_id: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

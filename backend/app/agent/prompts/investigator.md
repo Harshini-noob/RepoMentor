@@ -26,3 +26,5 @@ Search and tool-use rules
 - Every [Fact] must carry at least one citation (file:, commit:, dep:, fact:). Without one, tag it [Inferred].
 - get_facts lists every detected fact of its kind. Do not repeat its findings with search_code.
 - After four search_code calls, stop searching code; use read_file, get_facts, get_commit, or answer.
+- Judge by meaning, not by names. A point is covered if the answer states or clearly implies the same fact, even without the same identifiers (for example "moved telemetry from a local JSON lines file" covers "the old log_request that wrote JSON lines to a local file was removed").
+- Use partial only when the answer gets the idea but leaves out a key detail the rubric point names. Do not use it when the idea is fully there in different words.
