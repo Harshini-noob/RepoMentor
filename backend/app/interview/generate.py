@@ -72,6 +72,11 @@ async def generate_question(
     commit: str | None = None,
     chat_fn: Callable[..., Any] | None = None,
     save: bool = True,
+    seed: dict | None = None,
+    focus_points: list[str] | None = None,
+    avoid_question: str | None = None,
+    parent_question_id: str | None = None,
+    concept: str | None = None,
 ) -> InterviewQuestion:
     """
     Generate one grounded interview question.
@@ -108,18 +113,21 @@ async def generate_question(
         )
 
     # 2. Load earlier questions for this project (for deduplication in pick_seed)
+    # Skip if seed is provided directly
     asked: list[dict] = []
-    cursor = db.interview_questions.find({"project_id": project_id}, {"_id": 0})
-    # Support both async (motor) and sync (mongomock) cursors
-    if hasattr(cursor, "__aiter__"):
-        async for doc in cursor:
-            asked.append(doc)
-    else:
-        for doc in cursor:
-            asked.append(doc)
+    if seed is None:
+        cursor = db.interview_questions.find({"project_id": project_id}, {"_id": 0})
+        # Support both async (motor) and sync (mongomock) cursors
+        if hasattr(cursor, "__aiter__"):
+            async for doc in cursor:
+                asked.append(doc)
+        else:
+            for doc in cursor:
+                asked.append(doc)
 
-    # 3. Pick seed
-    seed = pick_seed(dossier, round_name, asked, commit=commit)
+    # 3. Pick seed (or use the provided seed directly)
+    if seed is None:
+        seed = pick_seed(dossier, round_name, asked, commit=commit)
     seed_claims = seed.get("claims", [])
 
     # Seed text for candidates and name grounding
@@ -144,6 +152,14 @@ async def generate_question(
         f"Allowed concepts: {concepts_str}\n\n"
         f"Seed facts:\n{seed_lines_text}"
     )
+
+    # Append focus_points if given
+    if focus_points:
+        user_msg += f"\nThe candidate missed these ideas: {'; '.join(focus_points)}; ask about them."
+
+    # Append avoid_question if given
+    if avoid_question:
+        user_msg += f"\nDo not repeat or paraphrase this question: {avoid_question}"
 
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
@@ -243,6 +259,10 @@ async def generate_question(
         )
         data["concept"] = candidates[0]
         validation_notes.append("concept replaced by code")
+
+    # Override concept if caller specified one
+    if concept is not None and data.get("concept") != concept:
+        data["concept"] = concept
 
     # 10. Key-point repo-grounding checks (after name validation, before saving)
     key_points, kp_notes = _validate_key_points(
@@ -362,6 +382,35 @@ async def generate_question(
         common_mistakes = common_mistakes[:3]
         validation_notes.append(f"trimmed common mistakes from {initial_cm_len} to 3")
 
+    # 10d. Word-overlap check: if avoid_question given, verify generated question is different enough
+    if avoid_question:
+        generated_words = _content_words(data.get("question", ""))
+        avoid_words = _content_words(avoid_question)
+        overlap = generated_words & avoid_words
+        ratio = len(overlap) / max(1, len(avoid_words))
+        if ratio > 0.70:
+            # Retry once
+            messages_av = [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+                {"role": "assistant", "content": reply.content or ""},
+                {"role": "user", "content": "The question is too similar to the avoided question. Write a clearly different question."},
+            ]
+            reply_av: LLMReply = await _chat(messages_av, tools=None)
+            data_av, parse_ok_av = _parse_json(reply_av.content or "")
+            if parse_ok_av:
+                _validate_structure(data_av)
+                data = data_av
+                reply = reply_av
+            # Check ratio again
+            generated_words2 = _content_words(data.get("question", ""))
+            overlap2 = generated_words2 & avoid_words
+            ratio2 = len(overlap2) / max(1, len(avoid_words))
+            if ratio2 > 0.70:
+                raise InterviewGenerationError(
+                    "Generated follow-up question is too similar to the avoided question after retry."
+                )
+
     # 11. Build model
     iq = InterviewQuestion(
         project_id=project_id,
@@ -374,6 +423,7 @@ async def generate_question(
         seed=seed,
         candidate_concepts=candidates,
         validation_notes=validation_notes,
+        parent_question_id=parent_question_id,
     )
 
     # 12. Persist

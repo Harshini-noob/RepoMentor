@@ -157,6 +157,7 @@ async def test_full_3_question_run():
         generate_fn=fake_gen,
         evaluate_fn=fake_eval,
         out=lambda x: None,
+        teach=False,
     )
 
     assert session["status"] == "finished"
@@ -211,6 +212,7 @@ async def test_skip_records_item_excludes_from_average():
         generate_fn=fake_gen,
         evaluate_fn=fake_eval,
         out=lambda x: None,
+        teach=False,
     )
 
     assert session["status"] == "finished"

@@ -37,10 +37,10 @@ from app.mentor.sessions import create_session, get_session
 def print_usage() -> None:
     print('Usage: python -m app.cli ask <project_id> "<question>"')
     print('       python -m app.cli chat <project_id> [--session <id>]')
-    print('       python -m app.cli teach <project_id> [--attempt <id> | --last] [--dry-run]')
+    print('       python -m app.cli teach <project_id> [--attempt <id> | --last] [--dry-run] [--show-seed]')
     print('       python -m app.cli interview-question <project_id> --round <name> --difficulty <int> [--commit <sha>] [--dry-run] [--show-seed]')
     print('       python -m app.cli interview-answer <project_id> [--question <id> | --last] [--answer "text"] [--dry-run]')
-    print('       python -m app.cli interview <project_id> [--questions N] [--difficulty D] [--session <id>]')
+    print('       python -m app.cli interview <project_id> [--questions N] [--difficulty D] [--session <id>] [--no-teach] [--teach-below N] [--max-lessons N]')
     print('       python -m app.cli interview-report <project_id> [--session <id>]')
     print('       python -m app.cli profile <project_id> [--rebuild]')
     print('Example: python -m app.cli ask proj_123 "What dependencies does this project use?"')
@@ -484,6 +484,7 @@ def main() -> None:
         attempt_selected = False
         last_selected = False
         dry_run = False
+        show_seed = False
         i = 2
         while i < len(args):
             flag = args[i]
@@ -504,6 +505,9 @@ def main() -> None:
                 i += 1
             elif flag == "--dry-run":
                 dry_run = True
+                i += 1
+            elif flag == "--show-seed":
+                show_seed = True
                 i += 1
             else:
                 print(f"Error: unknown argument: {flag}", file=sys.stderr)
@@ -530,6 +534,27 @@ def main() -> None:
                 if inspect.isawaitable(attempt):
                     attempt = await attempt
                 evaluation = attempt.get("evaluation", {})
+
+                if show_seed:
+                    question = database.interview_questions.find_one(
+                        {"question_id": lesson["question_id"]}, {"_id": 0}
+                    )
+                    if inspect.isawaitable(question):
+                        question = await question
+                    if question and question.get("seed"):
+                        seed = question["seed"]
+                        print("Seed:")
+                        print(f"  section: {seed.get('section')}")
+                        if seed.get("commit"):
+                            print(f"  commit:  {seed['commit']}")
+                        for c in seed.get("claims", []):
+                            tag = c.get("tag", "?")
+                            claim = c.get("claim", "")
+                            ev = c.get("evidence") or []
+                            ev_str = ", ".join(ev[:4])
+                            print(f"  [{tag}] {claim}  ({ev_str})")
+                        print()
+
                 print(f"Concept: {lesson['concept']}")
                 print(f"Difficulty: {attempt.get('difficulty', 'unknown')}")
                 print(f"Score: {evaluation.get('score', 'unknown')}/4")
@@ -563,6 +588,9 @@ def main() -> None:
         questions_n = 5
         difficulty = 2
         session_id: str | None = None
+        teach = True
+        teach_threshold = 2
+        max_lessons = 2
         i = 2
 
         try:
@@ -590,12 +618,35 @@ def main() -> None:
                 elif flag.startswith("--session="):
                     session_id = flag.split("=", 1)[1]
                     i += 1
+                elif flag == "--no-teach":
+                    teach = False
+                    i += 1
+                elif flag == "--teach-below":
+                    if i + 1 >= len(args):
+                        print("Error: --teach-below requires an argument", file=sys.stderr)
+                        print_usage()
+                        sys.exit(1)
+                    teach_threshold = int(args[i + 1])
+                    i += 2
+                elif flag.startswith("--teach-below="):
+                    teach_threshold = int(flag.split("=", 1)[1])
+                    i += 1
+                elif flag == "--max-lessons":
+                    if i + 1 >= len(args):
+                        print("Error: --max-lessons requires an argument", file=sys.stderr)
+                        print_usage()
+                        sys.exit(1)
+                    max_lessons = int(args[i + 1])
+                    i += 2
+                elif flag.startswith("--max-lessons="):
+                    max_lessons = int(flag.split("=", 1)[1])
+                    i += 1
                 else:
                     print(f"Error: unknown argument: {flag}", file=sys.stderr)
                     print_usage()
                     sys.exit(1)
         except ValueError:
-            print("Error: --questions and --difficulty must be integers", file=sys.stderr)
+            print("Error: integer arguments required", file=sys.stderr)
             print_usage()
             sys.exit(1)
 
@@ -619,6 +670,9 @@ def main() -> None:
                     n=questions_n,
                     base_difficulty=difficulty,
                     session_id=active_session_id,
+                    teach=teach,
+                    teach_threshold=teach_threshold,
+                    max_lessons=max_lessons,
                 )
 
             asyncio.run(_run())

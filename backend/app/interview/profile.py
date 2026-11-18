@@ -44,6 +44,39 @@ def _apply_attempt_to_doc(doc: dict, attempt: Any) -> dict:
     if attempt_id in applied:
         return doc
 
+    # Role-aware logic
+    role = _gv(attempt, "role") or "initial"
+
+    if role == "followup":
+        # Followup attempts: do nothing, just mark as applied
+        applied.append(attempt_id)
+        if len(applied) > _MAX_APPLIED:
+            applied[:] = applied[-_MAX_APPLIED:]
+        return doc
+
+    if role == "retry":
+        # Retry attempts: only decrement misses of points that were covered
+        ev = _gv(attempt, "evaluation")
+        points = _gv(ev, "points") or []
+        concepts: dict = doc.setdefault("concepts", {})
+        c = concepts.get(concept)
+        if c is not None:
+            misses: list = c.setdefault("misses", [])
+            for p in points:
+                p_text = _gv(p, "point") or ""
+                p_status = _gv(p, "status")
+                if p_status == "covered" and p_text:
+                    for m in misses:
+                        if m.get("point") == p_text:
+                            m["count"] = m.get("count", 1) - 1
+                            break
+                    c["misses"] = [m for m in misses if m.get("count", 1) > 0]
+        applied.append(attempt_id)
+        if len(applied) > _MAX_APPLIED:
+            applied[:] = applied[-_MAX_APPLIED:]
+        return doc
+
+    # "initial" (or missing role): apply score/attempts/misses as before
     ev = _gv(attempt, "evaluation")
     score_raw = _gv(ev, "score")
     if score_raw is None:
@@ -156,6 +189,36 @@ async def _upsert_doc(db: Any, project_id: str, doc: dict) -> None:
         await res
 
 
+async def record_teaching(db: Any, project_id: str, concept: str, before: int, after: int) -> None:
+    """Record a teaching lesson delta for the given concept."""
+    doc = await _get_doc(db, project_id)
+    if doc is None:
+        doc = {
+            "project_id": project_id,
+            "updated_at": _now_iso(),
+            "concepts": {},
+            "applied_attempts": [],
+        }
+
+    concepts: dict = doc.setdefault("concepts", {})
+    c = concepts.setdefault(concept, {
+        "score": 0.0,
+        "attempts": 0,
+        "last_score": 0,
+        "last_seen": _now_iso(),
+        "recent_scores": [],
+        "status": "unrated",
+        "misses": [],
+    })
+    c["lessons"] = c.get("lessons", 0) + 1
+    recent_deltas = c.setdefault("recent_deltas", [])
+    recent_deltas.append(after - before)
+    if len(recent_deltas) > 5:
+        c["recent_deltas"] = recent_deltas[-5:]
+    doc["updated_at"] = _now_iso()
+    await _upsert_doc(db, project_id, doc)
+
+
 async def update_from_attempt(db: Any, attempt: Any) -> None:
     """Update the learner profile from a saved attempt. Idempotent per attempt_id."""
     project_id = _gv(attempt, "project_id")
@@ -191,7 +254,16 @@ async def rebuild(db: Any, project_id: str) -> None:
     else:
         attempts = list(cur)
 
-    if not attempts:
+    # Fetch all lessons ordered by created_at
+    l_cur = db.interview_lessons.find({"project_id": project_id}).sort("created_at", 1)
+    if hasattr(l_cur, "to_list"):
+        lessons = await l_cur.to_list(None)
+    elif inspect.isawaitable(l_cur):
+        lessons = list(await l_cur)
+    else:
+        lessons = list(l_cur)
+
+    if not attempts and not lessons:
         return
 
     doc: dict = {
@@ -202,6 +274,40 @@ async def rebuild(db: Any, project_id: str) -> None:
     }
     for att in attempts:
         _apply_attempt_to_doc(doc, att)
+
+    # Replay lessons from interview_lessons:
+    # (the before/after from the attempt chain: retry attempt score minus its parent attempt's score)
+    attempts_by_id = {str(_gv(a, "attempt_id")): a for a in attempts}
+    for lesson in lessons:
+        lesson_attempt_id = str(_gv(lesson, "attempt_id"))
+        parent_att = attempts_by_id.get(lesson_attempt_id)
+        retry_att = next(
+            (
+                a for a in attempts
+                if str(_gv(a, "parent_attempt_id")) == lesson_attempt_id
+                and _gv(a, "role") == "retry"
+            ),
+            None,
+        )
+        if retry_att is not None and parent_att is not None:
+            before = _gv(_gv(parent_att, "evaluation"), "score")
+            after = _gv(_gv(retry_att, "evaluation"), "score")
+            concept = _gv(lesson, "concept") or _gv(parent_att, "concept")
+            if before is not None and after is not None and concept:
+                c = doc["concepts"].setdefault(concept, {
+                    "score": 0.0,
+                    "attempts": 0,
+                    "last_score": 0,
+                    "last_seen": _now_iso(),
+                    "recent_scores": [],
+                    "status": "unrated",
+                    "misses": [],
+                })
+                c["lessons"] = c.get("lessons", 0) + 1
+                recent_deltas = c.setdefault("recent_deltas", [])
+                recent_deltas.append(int(after) - int(before))
+                if len(recent_deltas) > 5:
+                    c["recent_deltas"] = recent_deltas[-5:]
 
     await _upsert_doc(db, project_id, doc)
 

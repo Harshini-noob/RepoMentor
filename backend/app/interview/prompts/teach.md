@@ -9,3 +9,6 @@ Rules
   Say it like this: one sentence the candidate can say in an interview.
 - Never claim anything about the project that no seed line supports. If the seed does not cover something, write a line starting with [Uncertain] saying so.
 - Do not call the candidate's reasons or motives wrong; only add what is missing.
+- Write evidence IDs copied from the seed line, never line numbers.
+- Use the label 'Say it like this:' exactly.
+- A [Fact] line says what its seed line says and nothing more; every consequence, effect or if/may statement is a separate [General] line.

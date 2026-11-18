@@ -29,6 +29,7 @@ class InterviewQuestion(BaseModel):
     candidate_concepts: list[str] = Field(default_factory=list)
     validation_notes: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    parent_question_id: str | None = None
 
 
 class PointResult(BaseModel):
@@ -78,3 +79,5 @@ class InterviewAttempt(BaseModel):
     tokens: int = 0
     session_id: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    role: Literal["initial", "followup", "retry"] = "initial"
+    parent_attempt_id: str | None = None

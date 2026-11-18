@@ -3,10 +3,12 @@ from app.interview.evaluate import (
     evaluate_answer,
 )
 from app.interview.generate import InterviewGenerationError, generate_question
+from app.interview.lesson import LessonGenerationError, generate_lesson
 from app.interview.profile import (
     get_profile,
     next_difficulty,
     rebuild,
+    record_teaching,
     update_from_attempt,
     weak_concepts,
 )
@@ -52,8 +54,11 @@ __all__ = [
     "run_interview",
     "print_interview_summary",
     "update_from_attempt",
+    "record_teaching",
     "rebuild",
     "get_profile",
     "weak_concepts",
     "next_difficulty",
+    "generate_lesson",
+    "LessonGenerationError",
 ]

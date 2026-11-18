@@ -172,6 +172,7 @@ async def generate_lesson(
     text = (reply.content or "").translate(ANSWER_CHAR_MAP)
     notes: list[str] = []
 
+    # (1) Label check + retry (existing)
     if not all(label in text for label in _LABELS):
         messages = [
             *base_messages,
@@ -181,6 +182,62 @@ async def generate_lesson(
         reply = await _chat(messages, tools=None)
         text = (reply.content or "").translate(ANSWER_CHAR_MAP)
 
+    # (2) Label rename: "Candidate line:" or "Say:" → "Say it like this:"
+    new_lines = []
+    renamed = False
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("Candidate line:") or stripped.startswith("Say:"):
+            prefix = line[: len(line) - len(stripped)]
+            if stripped.startswith("Candidate line:"):
+                rest = stripped[len("Candidate line:"):]
+            else:
+                rest = stripped[len("Say:"):]
+            line = prefix + "Say it like this:" + rest
+            renamed = True
+        new_lines.append(line)
+    if renamed:
+        text = "\n".join(new_lines)
+        notes.append("renamed label to 'Say it like this:'")
+
+    # (3) [N] → evidence IDs expansion
+    _NUM_BRACKET_RE = re.compile(r'\[(\d+(?:,\s*\d+)*)\]')
+
+    def _expand_line_numbers(m: re.Match) -> str:
+        inner = m.group(1)
+        nums = [int(x.strip()) for x in inner.split(",") if x.strip().isdigit()]
+        ids_out: list[str] = []
+        for n in nums:
+            if 1 <= n <= len(seed_claims):
+                claim = seed_claims[n - 1]
+                evs = [e.strip() for e in (claim.get("evidence") or []) if isinstance(e, str)]
+                ids_out.extend(evs)
+        ids_out = ids_out[:2]
+        if not ids_out:
+            return ""  # bracket becomes empty → stripped below
+        return "[" + ", ".join(ids_out) + "]"
+
+    expanded_lines = []
+    any_expanded = False
+    for line in text.splitlines():
+        def _replacer(m: re.Match) -> str:
+            # Only replace if ALL tokens inside are digit-only (not already-expanded IDs)
+            inner = m.group(1)
+            parts = [x.strip() for x in inner.split(",")]
+            if all(p.isdigit() for p in parts):
+                return _expand_line_numbers(m)
+            return m.group(0)
+        new_line, n_subs = _NUM_BRACKET_RE.subn(_replacer, line)
+        # strip empty brackets
+        new_line = re.sub(r'\[\s*\]', '', new_line)
+        if new_line != line:
+            any_expanded = True
+        expanded_lines.append(new_line)
+    if any_expanded:
+        text = "\n".join(expanded_lines)
+        notes.append("expanded line-number citations to evidence IDs")
+
+    # (4) Citation check + retry + clean (existing)
     unsupported, uncited_facts = _citation_state(text, seed_ids)
     if unsupported or uncited_facts:
         ids_to_report = ", ".join(unsupported) if unsupported else (
@@ -200,6 +257,59 @@ async def generate_lesson(
         unsupported, uncited_facts = _citation_state(text, seed_ids)
         if unsupported or uncited_facts:
             text = _clean_citations(text, seed_ids, notes)
+
+    # Build a lookup: evidence_id → claim text for effect-word checks
+    _eid_to_claim: dict[str, str] = {}
+    for claim in seed_claims:
+        claim_text = (claim.get("claim") or "").lower()
+        for eid in (claim.get("evidence") or []):
+            if isinstance(eid, str):
+                _eid_to_claim[eid.strip()] = claim_text
+
+    _EFFECT_WORDS_LESSON = {
+        "latency", "faster", "slower", "speed", "cost", "cheaper",
+        "scale", "scalab", "reliab", "throughput", "performance", "accuracy",
+    }
+    _MODAL_WORDS = {"may", "might", "could", "would", "likely"}
+
+    # (5) Effect-word [Fact] → [Inferred]
+    result_lines = []
+    for line in text.splitlines():
+        if _FACT_LINE_RE.match(line):
+            line_lower = line.lower()
+            matched_effect = next(
+                (w for w in _EFFECT_WORDS_LESSON if w in line_lower), None
+            )
+            if matched_effect:
+                # Find evidence IDs cited in this line
+                cited_ids = set(CITE_RE.findall(line.translate(ANSWER_CHAR_MAP)))
+                # Check if effect word appears in any cited seed claim
+                effect_in_seed = any(
+                    matched_effect in _eid_to_claim.get(eid, "")
+                    for eid in cited_ids
+                )
+                if not effect_in_seed:
+                    # Change [Fact] → [Inferred]
+                    line = _FACT_LINE_RE.sub("[Inferred]", line, count=1)
+                    notes.append("changed [Fact] to [Inferred]: effect word not in seed")
+        result_lines.append(line)
+    text = "\n".join(result_lines)
+
+    # (6) Modal [Fact] → [General]
+    _MODAL_RE = re.compile(
+        r'\b(may|might|could|would|likely|if)\b', re.I
+    )
+    result_lines2 = []
+    for line in text.splitlines():
+        if _FACT_LINE_RE.match(line):
+            if _MODAL_RE.search(line):
+                line = _FACT_LINE_RE.sub("[General]", line, count=1)
+                # Remove evidence IDs brackets
+                line = re.sub(r'\s*\[[^\]]*\b(?:file|commit|pr|dep|fact):[^\]]*\]', '', line)
+                line = re.sub(r'\[\s*\]', '', line).rstrip()
+                notes.append("changed [Fact] to [General]: modal/conditional language")
+        result_lines2.append(line)
+    text = "\n".join(result_lines2)
 
     usage = getattr(reply, "usage", {}) or {}
     tokens = usage.get("total_tokens", 0) or (

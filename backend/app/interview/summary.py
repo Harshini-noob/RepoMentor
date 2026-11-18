@@ -70,11 +70,35 @@ def build_summary(
     general_points: list[dict[str, Any]] = []
     seen_points: set[str] = set()
 
+    lessons_given = 0
+    before_after: list[dict[str, Any]] = []
+    deltas: list[int] = []
+
     for it in items:
         status = _get_val(it, "status")
         score = _get_val(it, "score")
         qid = _get_val(it, "question_id")
         aid = _get_val(it, "attempt_id")
+
+        if _get_val(it, "lesson_id"):
+            lessons_given += 1
+
+        b = _get_val(it, "before")
+        a = _get_val(it, "after")
+        if b is not None and a is not None:
+            q_for_ba = questions_map.get(qid) if qid else None
+            concept_ba = _get_val(q_for_ba, "concept") or ""
+            q_text_ba = _get_val(q_for_ba, "question") or ""
+            delta = a - b
+            deltas.append(delta)
+            before_after.append({
+                "question_id": qid,
+                "question": q_text_ba,
+                "concept": concept_ba,
+                "before": b,
+                "after": a,
+                "delta": delta,
+            })
 
         q = questions_map.get(qid) if qid else None
         round_name = _get_val(q, "round")
@@ -87,6 +111,17 @@ def build_summary(
                 scores.append(score)
                 if concept:
                     concept_scores[concept].append(score)
+
+            # Check if points were recovered (covered) in retry attempt
+            retry_aid = _get_val(it, "retry_attempt_id")
+            retry_attempt = attempts_map.get(retry_aid) if retry_aid else None
+            covered_in_retry: set[str] = set()
+            if retry_attempt:
+                ret_ev = _get_val(retry_attempt, "evaluation")
+                ret_pts = _get_val(ret_ev, "points") or []
+                for rp in ret_pts:
+                    if _get_val(rp, "status") == "covered":
+                        covered_in_retry.add(_get_val(rp, "point") or "")
 
             # Process rubric points for revision and count unverified
             attempt = attempts_map.get(aid) if aid else None
@@ -101,6 +136,9 @@ def build_summary(
                         p_text = _get_val(p, "point") or ""
                         p_kind = _get_val(p, "kind") or "general"
                         if not p_text or p_text in seen_points:
+                            continue
+                        # Exclude points recovered in the retry attempt of the same question
+                        if p_text in covered_in_retry:
                             continue
                         seen_points.add(p_text)
                         entry = {
@@ -126,6 +164,7 @@ def build_summary(
         )
 
     average_score = (sum(scores) / len(scores)) if scores else None
+    average_improvement = (sum(deltas) / len(deltas)) if deltas else None
 
     # Per-concept statistics
     per_concept: dict[str, dict[str, Any]] = {}
@@ -156,4 +195,7 @@ def build_summary(
         "revise": revise,
         "unverified_count": unverified_count,
         "unverified": unverified_count,
+        "lessons_given": lessons_given,
+        "before_after": before_after,
+        "average_improvement": average_improvement,
     }
