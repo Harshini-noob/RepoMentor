@@ -18,6 +18,7 @@ CONCEPTS = [
     "deployment-and-ci",
     "refactoring",
     "caching",
+    "ui-and-dashboards",
     "general",
 ]
 
@@ -51,6 +52,7 @@ CONCEPT_KEYWORDS = {
     "deployment-and-ci": ["docker", "ci", "workflow"],
     "refactoring": ["refactor", "rename", "replace"],
     "caching": ["cache", "cached", "ttl"],
+    "ui-and-dashboards": ["streamlit", "dashboard", "gradio", "ui", "frontend", "chart", "page"],
 }
 
 

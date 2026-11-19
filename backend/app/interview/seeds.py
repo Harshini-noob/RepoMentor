@@ -10,7 +10,7 @@ import random
 import re
 from typing import Any
 
-from .concepts import ROUNDS
+from .concepts import ROUNDS, candidate_concepts
 
 
 def _claim_as_dict(claim: Any) -> dict:
@@ -416,3 +416,142 @@ def _pick_claim_seed(
         ],
         "commit": chosen_commit or None,
     }
+
+
+def find_seed_for_concept(
+    dossier: Any,
+    concept: str,
+    asked: list[dict],
+    commit: str | None = None,
+) -> tuple[dict, str] | None:
+    """Find a candidate seed from any round that matches the given concept."""
+    sections = _get_sections(dossier)
+    if not sections:
+        return None
+
+    candidates: list[tuple[dict, str]] = []
+
+    # 1. History seeds (from decisions claims grouped by commit)
+    decisions_claims = sections.get("decisions") or []
+    by_commit: dict[str, list[dict]] = {}
+    for claim in decisions_claims:
+        sha = (claim.get("details") or {}).get("commit")
+        if sha:
+            by_commit.setdefault(sha, []).append(claim)
+    for claim in decisions_claims:
+        for eid in claim.get("evidence") or []:
+            if isinstance(eid, str) and eid.startswith("commit:"):
+                parts = eid.split(":")
+                if len(parts) >= 2 and parts[1]:
+                    sha = parts[1]
+                    by_commit.setdefault(sha, [])
+                    if claim not in by_commit[sha]:
+                        by_commit[sha].append(claim)
+
+    for sha, c_list in by_commit.items():
+        if commit is not None and sha != commit and sha[:7] != commit[:7]:
+            continue
+        if any(str(c.get("tag", "")).lower() == "fact" for c in c_list):
+            hist_seed = _build_history_result(sha, c_list)
+            candidates.append((hist_seed, "history"))
+
+    # 2. Tech seeds (from technologies and data)
+    tech_sections = ["technologies", "data"]
+    for sec in tech_sections:
+        for claim in sections.get(sec) or []:
+            if str(claim.get("tag", "")).lower() != "fact":
+                continue
+            evidence = claim.get("evidence") or []
+            if not any(
+                isinstance(e, str) and e.startswith(_TECH_EVIDENCE_PREFIXES)
+                for e in evidence
+            ):
+                continue
+            related = _score_and_find_related_claims(claim, sections)
+            seed_claims = [claim] + related
+            seed = {
+                "section": sec,
+                "claims": [
+                    {
+                        "claim": c.get("claim", ""),
+                        "tag": c.get("tag", "uncertain"),
+                        "evidence": c.get("evidence") or [],
+                    }
+                    for c in seed_claims[:5]
+                ],
+                "commit": (claim.get("details") or {}).get("commit") or None,
+            }
+            candidates.append((seed, "tech"))
+
+    # 3. Architecture seeds (from components, apis, features)
+    arch_sections = ["components", "apis", "features"]
+    for sec in arch_sections:
+        for claim in sections.get(sec) or []:
+            if str(claim.get("tag", "")).lower() != "fact":
+                continue
+            evidence = claim.get("evidence") or []
+            if not any(
+                isinstance(e, str) and e.startswith("file:")
+                for e in evidence
+            ):
+                continue
+            related = _score_and_find_related_claims(claim, sections)
+            seed_claims = [claim] + related
+            seed = {
+                "section": sec,
+                "claims": [
+                    {
+                        "claim": c.get("claim", ""),
+                        "tag": c.get("tag", "uncertain"),
+                        "evidence": c.get("evidence") or [],
+                    }
+                    for c in seed_claims[:5]
+                ],
+                "commit": (claim.get("details") or {}).get("commit") or None,
+            }
+            candidates.append((seed, "architecture"))
+
+    if not candidates:
+        return None
+
+    # Track already asked
+    already_asked_commits = {
+        (d.get("seed") or {}).get("commit", "")
+        for d in asked
+        if (d.get("seed") or {}).get("commit")
+    }
+    asked_texts = {
+        c.get("claim", "")
+        for d in asked
+        for c in (d.get("seed") or {}).get("claims", [])
+    }
+
+    matching_candidates: list[tuple[int, int, dict, str]] = []
+
+    for seed, round_name in candidates:
+        seed_text = " ".join(
+            c.get("claim", "") + " " + " ".join(c.get("evidence") or [])
+            for c in seed.get("claims", [])
+        ).lower()
+        cands = candidate_concepts(seed_text, k=3)
+        if concept in cands:
+            rank = cands.index(concept)
+            is_asked = bool(
+                (seed.get("commit") and seed["commit"] in already_asked_commits)
+                or (seed.get("claims") and seed["claims"][0].get("claim") in asked_texts)
+            )
+            asked_priority = 1 if is_asked else 0
+            matching_candidates.append((rank, asked_priority, seed, round_name))
+
+    if not matching_candidates:
+        return None
+
+    # Prefer highest rank (lowest rank index), then not asked before (asked_priority 0)
+    best_key = min(matching_candidates, key=lambda x: (x[0], x[1]))[:2]
+    tied_pool = [
+        (seed, round_name)
+        for rank, asked_prio, seed, round_name in matching_candidates
+        if (rank, asked_prio) == best_key
+    ]
+
+    return random.choice(tied_pool)

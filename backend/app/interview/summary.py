@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import defaultdict, namedtuple
 from typing import Any, Sequence
 
+from app.interview.filters import is_listing_point
+
 
 class ItemRow(namedtuple("ItemRow", ["round", "difficulty", "concept", "score"])):
     """Namedtuple representing a per-item summary row with dict-like key access."""
@@ -139,6 +141,8 @@ def build_summary(
                             continue
                         # Exclude points recovered in the retry attempt of the same question
                         if p_text in covered_in_retry:
+                            continue
+                        if is_listing_point(p_text):
                             continue
                         seen_points.add(p_text)
                         entry = {

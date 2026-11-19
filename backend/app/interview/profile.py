@@ -11,6 +11,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from app.interview.filters import is_listing_point
+
 logger = logging.getLogger("repomentor.interview.profile")
 
 _MAX_APPLIED = 200
@@ -129,6 +131,8 @@ def _apply_attempt_to_doc(doc: dict, attempt: Any) -> dict:
         misses: list = c.setdefault("misses", [])
 
         if p_status in ("missing", "partial"):
+            if is_listing_point(p_text):
+                continue
             # Upsert: find existing entry by text
             existing = next((m for m in misses if m.get("point") == p_text), None)
             if existing:
@@ -325,7 +329,7 @@ def weak_concepts(profile: dict | None, k: int = 3) -> list[str]:
     eligible = [
         (name, info)
         for name, info in concepts.items()
-        if isinstance(info, dict) and info.get("attempts", 0) >= 1
+        if name != "general" and isinstance(info, dict) and info.get("attempts", 0) >= 1
     ]
     eligible.sort(key=lambda x: (x[1].get("score", 0.0), x[0]))
     return [name for name, _ in eligible[:k]]
@@ -340,7 +344,7 @@ def next_difficulty(profile: dict | None, concept: str, default: int) -> int:
     - otherwise → default
     Clamped to 1..5.
     """
-    if not profile:
+    if not profile or concept == "general":
         return max(1, min(5, default))
     concepts = profile.get("concepts") or {}
     info = concepts.get(concept)

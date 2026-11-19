@@ -17,12 +17,11 @@ from app.agent.evidence import (
 from app.agent.llm import chat
 from app.agent.state import LLMReply
 from app.config import get_settings
+from app.interview.filters import is_listing_point
 
 _SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "teach.md").read_text(
     encoding="utf-8"
 )
-_IMPORT_USAGE_RE = re.compile(r"\b(imports?|imported|used in|used across)\b", re.I)
-_FILENAME_RE = re.compile(r"\b[\w/.-]+\.(?:py|js|ts|md|toml|ya?ml|json)\b", re.I)
 _FACT_LINE_RE = re.compile(r"^\s*\[Fact\]", re.I)
 _LABELS = ("Good:", "Idea:", "In your project:", "Say it like this:")
 
@@ -128,10 +127,7 @@ async def generate_lesson(
         point
         for point in evaluation_points
         if point.get("status") in ("missing", "partial")
-        and not (
-            _IMPORT_USAGE_RE.search(point.get("point", ""))
-            and _FILENAME_RE.search(point.get("point", ""))
-        )
+        and not is_listing_point(point.get("point", ""))
     ]
 
     seed_claims = (question.get("seed") or {}).get("claims", [])

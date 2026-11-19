@@ -12,12 +12,12 @@ import re
 import sys
 from typing import Any, Callable
 
-_IMPORT_USAGE_RE = re.compile(r"\b(imports?|imported|used in|used across)\b", re.I)
-_FILENAME_RE = re.compile(r"\b[\w/.-]+\.(?:py|js|ts|md|toml|ya?ml|json)\b", re.I)
-
 from app.interview.evaluate import evaluate_answer
+from app.interview.filters import is_listing_point
 from app.interview.generate import InterviewGenerationError, generate_question
+from app.interview.seeds import find_seed_for_concept
 from app.interview.session import (
+    ROUNDS_ORDER,
     advance,
     create_session,
     finish,
@@ -116,6 +116,7 @@ async def run_interview(
     max_lessons: int = 2,
     generate_followup_fn: Callable[..., Any] | None = None,
     lesson_fn: Callable[..., Any] | None = None,
+    adaptive: bool = True,
 ) -> dict[str, Any]:
     """Execute an interview session."""
     # 1. Create or load the session
@@ -128,7 +129,7 @@ async def run_interview(
                 f"Session '{session_id}' belongs to project '{session.get('project_id')}', not '{project_id}'."
             )
     else:
-        session = await create_session(db, project_id, n=n, base_difficulty=base_difficulty)
+        session = await create_session(db, project_id, n=n, base_difficulty=base_difficulty, adaptive=adaptive)
 
     plan = session.get("plan", [])
     _gen = generate_fn if generate_fn is not None else generate_question
@@ -148,22 +149,74 @@ async def run_interview(
         idx = session["current"]
         slot = plan[idx]
         slot_num = idx + 1
-        r = slot.get("round", "")
+        concept = slot.get("concept")
+        r = slot.get("round")
         d = slot.get("difficulty", 1)
+
+        seed = None
+        gen_concept = None
+        if concept:
+            raw_dossier = db.dossiers.find_one({"project_id": project_id}, {"_id": 0})
+            dossier = await raw_dossier if inspect.isawaitable(raw_dossier) else raw_dossier
+
+            asked: list[dict] = []
+            cur = db.interview_questions.find({"project_id": project_id}, {"_id": 0})
+            if hasattr(cur, "to_list"):
+                asked = await cur.to_list(None)
+            elif inspect.isawaitable(cur):
+                asked = list(await cur)
+            else:
+                asked = list(cur)
+
+            seed_result = find_seed_for_concept(dossier, concept, asked) if dossier else None
+            if seed_result is not None:
+                seed, seed_round = seed_result
+                r = seed_round
+                gen_concept = concept
+            else:
+                if not r:
+                    r = ROUNDS_ORDER[idx % len(ROUNDS_ORDER)]
+                note = f"no seed for {concept}, used round order"
+                session.setdefault("notes", []).append(note)
+                note_res = db.interview_sessions.update_one(
+                    {"session_id": session["session_id"]},
+                    {"$push": {"notes": note}},
+                )
+                if inspect.isawaitable(note_res):
+                    await note_res
+        else:
+            if not r:
+                r = ROUNDS_ORDER[idx % len(ROUNDS_ORDER)]
 
         out(f"\nQuestion {slot_num} of {len(plan)}, {r}, difficulty {d}")
 
         # Generate question with single retry on InterviewGenerationError
         async def _call_gen(*a, **k):
-            res = _gen(*a, **k)
+            try:
+                res = _gen(*a, **k)
+            except TypeError as te:
+                if "unexpected keyword argument" in str(te):
+                    res = _gen(a[0], a[1], round_name=k.get("round_name"), difficulty=k.get("difficulty"))
+                else:
+                    raise
             return (await res) if inspect.isawaitable(res) else res
+
+        gen_kwargs: dict[str, Any] = {
+            "round_name": r,
+            "difficulty": d,
+            "save": True,
+        }
+        if seed is not None:
+            gen_kwargs["seed"] = seed
+        if gen_concept is not None:
+            gen_kwargs["concept"] = gen_concept
 
         q = None
         try:
-            q = await _call_gen(db, project_id, round_name=r, difficulty=d, save=True)
+            q = await _call_gen(db, project_id, **gen_kwargs)
         except InterviewGenerationError:
             try:
-                q = await _call_gen(db, project_id, round_name=r, difficulty=d, save=True)
+                q = await _call_gen(db, project_id, **gen_kwargs)
             except InterviewGenerationError as exc:
                 item = {
                     "question_id": None,
@@ -315,10 +368,7 @@ async def run_interview(
             focus_points = [
                 _get_val(p, "point")
                 for p in missed
-                if not (
-                    _IMPORT_USAGE_RE.search(_get_val(p, "point") or "")
-                    and _FILENAME_RE.search(_get_val(p, "point") or "")
-                )
+                if not is_listing_point(_get_val(p, "point") or "")
             ]
 
             # b. follow-up
@@ -334,7 +384,7 @@ async def run_interview(
                     focus_points=focus_points,
                     avoid_question=question_text,
                     parent_question_id=qid,
-                    concept=_get_val(q, "concept"),
+                    concept=_get_val(q, "concept") or concept,
                     save=True,
                 )
                 if inspect.isawaitable(fu_res):

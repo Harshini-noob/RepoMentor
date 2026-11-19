@@ -22,10 +22,13 @@ from app.core.db import get_db
 from app.interview.evaluate import InterviewEvaluationError, evaluate_answer
 from app.interview.generate import InterviewGenerationError, generate_question
 from app.interview.lesson import LessonGenerationError, generate_lesson
+from app.interview.plan import build_plan as build_adaptive_plan
 from app.interview.profile import get_profile, rebuild as rebuild_profile
 from app.interview.runner import print_interview_summary, run_interview
 from app.interview.schema import InterviewAttempt, InterviewQuestion
+from app.interview.seeds import find_seed_for_concept, pick_seed
 from app.interview.session import (
+    ROUNDS_ORDER,
     create_session as create_interview_session,
     get_session as get_interview_session,
 )
@@ -40,12 +43,15 @@ def print_usage() -> None:
     print('       python -m app.cli teach <project_id> [--attempt <id> | --last] [--dry-run] [--show-seed]')
     print('       python -m app.cli interview-question <project_id> --round <name> --difficulty <int> [--commit <sha>] [--dry-run] [--show-seed]')
     print('       python -m app.cli interview-answer <project_id> [--question <id> | --last] [--answer "text"] [--dry-run]')
-    print('       python -m app.cli interview <project_id> [--questions N] [--difficulty D] [--session <id>] [--no-teach] [--teach-below N] [--max-lessons N]')
+    print('       python -m app.cli interview-plan <project_id> [--questions N] [--difficulty D]')
+    print('       python -m app.cli interview <project_id> [--questions N] [--difficulty D] [--session <id>] [--fixed] [--no-teach] [--teach-below N] [--max-lessons N]')
     print('       python -m app.cli interview-report <project_id> [--session <id>]')
     print('       python -m app.cli profile <project_id> [--rebuild]')
     print('Example: python -m app.cli ask proj_123 "What dependencies does this project use?"')
     print('         python -m app.cli chat proj_123')
+    print('         python -m app.cli interview-plan proj_123 --questions 5 --difficulty 2')
     print('         python -m app.cli interview proj_123 --questions 5 --difficulty 2')
+    print('         python -m app.cli interview proj_123 --questions 5 --difficulty 2 --fixed')
     print('         python -m app.cli profile proj_123')
 
 
@@ -240,6 +246,40 @@ def _print_evaluation_result(attempt: "InterviewAttempt") -> None:
 
     if attempt.tokens:
         print(f"\nTokens used: {attempt.tokens}")
+
+
+def _format_and_print_plan(
+    plan_slots: list[dict],
+    dossier: Any = None,
+    asked: list[dict] | None = None,
+) -> None:
+    asked_copy = list(asked) if asked else []
+    for idx, slot in enumerate(plan_slots, start=1):
+        concept = slot.get("concept")
+        diff = slot.get("difficulty")
+        reason = slot.get("reason", "")
+        seed = None
+        if dossier:
+            if concept:
+                seed_res = find_seed_for_concept(dossier, concept, asked_copy)
+                if seed_res is not None:
+                    seed = seed_res[0]
+            if seed is None:
+                r = slot.get("round") or ROUNDS_ORDER[(idx - 1) % len(ROUNDS_ORDER)]
+                try:
+                    seed = pick_seed(dossier, r, asked_copy)
+                except Exception:
+                    seed = None
+
+        first_claim = ""
+        if seed:
+            claims = seed.get("claims") or []
+            if claims:
+                first_claim = claims[0].get("claim", "")
+            asked_copy.append({"seed": seed})
+
+        concept_display = concept if concept else "-"
+        print(f"{idx}. concept: {concept_display} | difficulty: {diff} | reason: {reason} | claim: {first_claim}")
 
 
 def main() -> None:
@@ -579,6 +619,74 @@ def main() -> None:
             print(f"Lesson generation error: {exc}", file=sys.stderr)
             sys.exit(2)
 
+    elif cmd == "interview-plan":
+        if len(args) < 2:
+            print_usage()
+            sys.exit(1)
+
+        project_id = args[1]
+        questions_n = 5
+        difficulty = 2
+        i = 2
+
+        try:
+            while i < len(args):
+                flag = args[i]
+                if flag in ("--questions", "--difficulty"):
+                    if i + 1 >= len(args):
+                        print(f"Error: {flag} requires an argument", file=sys.stderr)
+                        print_usage()
+                        sys.exit(1)
+                    value = args[i + 1]
+                    i += 2
+                    if flag == "--questions":
+                        questions_n = int(value)
+                    elif flag == "--difficulty":
+                        difficulty = int(value)
+                elif flag.startswith("--questions="):
+                    questions_n = int(flag.split("=", 1)[1])
+                    i += 1
+                elif flag.startswith("--difficulty="):
+                    difficulty = int(flag.split("=", 1)[1])
+                    i += 1
+                else:
+                    print(f"Error: unknown argument: {flag}", file=sys.stderr)
+                    print_usage()
+                    sys.exit(1)
+        except ValueError:
+            print("Error: integer arguments required", file=sys.stderr)
+            print_usage()
+            sys.exit(1)
+
+        try:
+            async def _run_plan() -> None:
+                database = get_db()
+                profile = await get_profile(database, project_id)
+                raw_dossier = database.dossiers.find_one({"project_id": project_id}, {"_id": 0})
+                dossier = await raw_dossier if inspect.isawaitable(raw_dossier) else raw_dossier
+                if not dossier:
+                    print(f"Error: No dossier found for project {project_id}", file=sys.stderr)
+                    sys.exit(1)
+
+                cur = database.interview_questions.find({"project_id": project_id}, {"_id": 0})
+                if hasattr(cur, "to_list"):
+                    asked_list = await cur.to_list(None)
+                elif inspect.isawaitable(cur):
+                    asked_list = list(await cur)
+                else:
+                    asked_list = list(cur)
+
+                plan = build_adaptive_plan(profile, questions_n, difficulty, dossier=dossier)
+                _format_and_print_plan(plan, dossier, asked_list)
+
+            asyncio.run(_run_plan())
+            sys.exit(0)
+        except KeyboardInterrupt:
+            sys.exit(130)
+        except Exception as exc:
+            print(f"Execution error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
     elif cmd == "interview":
         if len(args) < 2:
             print_usage()
@@ -588,6 +696,7 @@ def main() -> None:
         questions_n = 5
         difficulty = 2
         session_id: str | None = None
+        adaptive = True
         teach = True
         teach_threshold = 2
         max_lessons = 2
@@ -617,6 +726,9 @@ def main() -> None:
                     i += 1
                 elif flag.startswith("--session="):
                     session_id = flag.split("=", 1)[1]
+                    i += 1
+                elif flag == "--fixed":
+                    adaptive = False
                     i += 1
                 elif flag == "--no-teach":
                     teach = False
@@ -657,12 +769,28 @@ def main() -> None:
                 database = get_db()
                 if active_session_id is None:
                     created = await create_interview_session(
-                        database, project_id, n=questions_n, base_difficulty=difficulty
+                        database, project_id, n=questions_n, base_difficulty=difficulty, adaptive=adaptive
                     )
                     active_session_id = created["session_id"]
+                    session_doc = created
+                else:
+                    session_doc = await get_interview_session(database, active_session_id)
 
                 print(f"Session ID: {active_session_id}")
                 print(f"Resume with: python -m app.cli interview {project_id} --session {active_session_id}")
+
+                if session_doc:
+                    raw_dossier = database.dossiers.find_one({"project_id": project_id}, {"_id": 0})
+                    dossier = await raw_dossier if inspect.isawaitable(raw_dossier) else raw_dossier
+                    cur = database.interview_questions.find({"project_id": project_id}, {"_id": 0})
+                    if hasattr(cur, "to_list"):
+                        asked_list = await cur.to_list(None)
+                    elif inspect.isawaitable(cur):
+                        asked_list = list(await cur)
+                    else:
+                        asked_list = list(cur)
+                    print("\nInterview plan:")
+                    _format_and_print_plan(session_doc.get("plan", []), dossier, asked_list)
 
                 await run_interview(
                     database,
@@ -673,6 +801,7 @@ def main() -> None:
                     teach=teach,
                     teach_threshold=teach_threshold,
                     max_lessons=max_lessons,
+                    adaptive=adaptive,
                 )
 
             asyncio.run(_run())
