@@ -142,6 +142,54 @@ async def test_idempotent_per_attempt_id():
     assert info["score"] == pytest.approx(4.0)
 
 
+@pytest.mark.asyncio
+async def test_copied_retry_keeps_existing_profile_attempt_and_miss_behavior():
+    db = _make_db()
+    initial = _make_attempt(
+        "a1",
+        "proj",
+        "auth",
+        score=1,
+        points=[
+            {"id": 1, "point": "Use JWT tokens", "kind": "general", "status": "missing"}
+        ],
+    )
+    await update_from_attempt(db, initial)
+
+    retry = InterviewAttempt(
+        attempt_id="r1",
+        question_id=initial.question_id,
+        project_id="proj",
+        concept="auth",
+        difficulty=2,
+        answer="Copied answer from the lesson.",
+        evaluation=Evaluation(
+            points=[
+                PointResult(
+                    id=1,
+                    point="Use JWT tokens",
+                    kind="general",
+                    status="covered",
+                    quote="JWT tokens",
+                )
+            ],
+            misconceptions=[],
+            coverage=1.0,
+            score=4,
+        ),
+        role="retry",
+        parent_attempt_id="a1",
+        copied=True,
+    )
+    await update_from_attempt(db, retry)
+
+    profile = await get_profile(db, "proj")
+    auth = profile["concepts"]["auth"]
+    assert auth["attempts"] == 1
+    assert auth["score"] == 1.0
+    assert auth["misses"] == []
+
+
 # ---------------------------------------------------------------------------
 # 5. Rebuild gives same result as applying attempts one by one
 # ---------------------------------------------------------------------------

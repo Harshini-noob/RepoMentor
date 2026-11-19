@@ -155,7 +155,12 @@ async def generate_question(
 
     # Append focus_points if given
     if focus_points:
-        user_msg += f"\nThe candidate missed these ideas: {'; '.join(focus_points)}; ask about them."
+        user_msg += (
+            f"\nAsk a simpler question (difficulty {difficulty}) about this one idea: "
+            f"{focus_points[0]}. Write the rubric from your own question: what a "
+            "correct answer to THIS question contains. Do not add points about "
+            "other topics."
+        )
 
     # Append avoid_question if given
     if avoid_question:
@@ -411,6 +416,66 @@ async def generate_question(
                     "Generated follow-up question is too similar to the avoided question after retry."
                 )
 
+    if focus_points and not _followup_rubric_matches(
+        data.get("question", ""), key_points, focus_points[0]
+    ):
+        guidance = "The rubric includes points unrelated to the question; rewrite it from the question"
+        messages_rubric = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": reply.content or ""},
+            {"role": "user", "content": guidance},
+        ]
+        reply_rubric: LLMReply = await _chat(messages_rubric, tools=None)
+        retry_data, retry_ok = _parse_json(reply_rubric.content or "")
+        retry_key_points: list[KeyPoint] = []
+        retry_notes: list[str] = []
+        retry_ok = bool(
+            retry_ok
+            and isinstance(retry_data.get("question"), str)
+            and retry_data.get("question")
+            and isinstance(retry_data.get("key_points"), list)
+            and isinstance(retry_data.get("common_mistakes"), list)
+        )
+        if retry_ok:
+            _validate_structure(retry_data)
+            retry_key_points, retry_notes = _validate_key_points(
+                retry_data.get("key_points", []), seed_claims
+            )
+            if len(retry_key_points) > 5:
+                retry_notes.append(
+                    f"trimmed key points from {len(retry_key_points)} to 5"
+                )
+                retry_key_points = retry_key_points[:5]
+
+        retry_question = retry_data.get("question", "") if retry_ok else ""
+        retry_valid = (
+            retry_ok
+            and 3 <= len(retry_key_points) <= 5
+            and sum(point.kind == "general" for point in retry_key_points)
+            >= min_general_req
+            and bool(retry_data.get("common_mistakes"))
+            and not _check_banned_phrases(retry_question)
+            and not _find_ungrounded_names(retry_data, seed_text)
+            and _followup_rubric_matches(
+                retry_question, retry_key_points, focus_points[0]
+            )
+        )
+        if retry_valid:
+            data = retry_data
+            reply = reply_rubric
+            key_points = retry_key_points
+            validation_notes.extend(retry_notes)
+            if data.get("concept") not in candidates:
+                data["concept"] = candidates[0]
+                if "concept replaced by code" not in validation_notes:
+                    validation_notes.append("concept replaced by code")
+            if concept is not None:
+                data["concept"] = concept
+            common_mistakes = list(data.get("common_mistakes") or [])[:3]
+        else:
+            validation_notes.append("rubric may not match the question")
+
     # 11. Build model
     iq = InterviewQuestion(
         project_id=project_id,
@@ -500,6 +565,27 @@ def _content_words(text: str) -> set[str]:
         w for w in re.findall(r"[a-z]{4,}", text.lower())
         if w not in _STOPWORDS
     }
+
+
+def _followup_content_words(text: str) -> set[str]:
+    return {
+        word for word in re.findall(r"[a-z]{5,}", text.lower())
+        if word not in _STOPWORDS
+    }
+
+
+def _followup_rubric_matches(
+    question: str,
+    key_points: list[KeyPoint],
+    focus_point: str,
+) -> bool:
+    question_words = _followup_content_words(question)
+    if not question_words or not question_words & _followup_content_words(focus_point):
+        return False
+    return bool(key_points) and all(
+        question_words & _followup_content_words(key_point.point)
+        for key_point in key_points
+    )
 
 
 _FILE_REGEX = re.compile(r"\b[\w/.-]+\.(?:py|js|ts|md|toml|ya?ml|json)\b", re.IGNORECASE)

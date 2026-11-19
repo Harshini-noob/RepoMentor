@@ -379,6 +379,67 @@ async def test_attempt_saved_with_question_id():
     assert saved["evaluation"]["score"] == attempt.evaluation.score
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "expected_copied"),
+    [
+        (
+            "A bounded cache keeps frequently requested records available while reducing repeated database reads.",
+            True,
+        ),
+        (
+            "The expiration policy should prevent stale session data from persisting across request boundaries.",
+            True,
+        ),
+        (
+            "We chose this approach because it keeps the session predictable and avoids stale state.",
+            False,
+        ),
+        ("A bounded cache keeps frequently requested", False),
+    ],
+)
+async def test_retry_copy_detection_uses_lesson_and_parent_advice(answer, expected_copied):
+    db = _make_db()
+    _insert_sample_question(db, question_id="q_retry")
+    db.interview_attempts.insert_one({
+        "attempt_id": "a_parent",
+        "question_id": "q_retry",
+        "project_id": "proj_test",
+        "concept": "database-choice",
+        "evaluation": {
+            "score": 1,
+            "advice": "The expiration policy should prevent stale session data from persisting across request boundaries.",
+        },
+    })
+    db.interview_lessons.insert_one({
+        "attempt_id": "a_parent",
+        "text": "A bounded cache keeps frequently requested records available while reducing repeated database reads.",
+    })
+    fake_chat = AsyncMock(return_value=LLMReply(content=json.dumps({
+        "points": [],
+        "misconceptions": [],
+        "unverified": [],
+        "strengths": [],
+        "advice": "",
+    })))
+
+    attempt = await evaluate_answer(
+        db,
+        "q_retry",
+        answer,
+        chat_fn=fake_chat,
+        save=True,
+        role="retry",
+        parent_attempt_id="a_parent",
+    )
+
+    saved = db.interview_attempts.find_one({"attempt_id": attempt.attempt_id})
+    assert attempt.copied is expected_copied
+    assert saved["copied"] is expected_copied
+    assert ("answer largely copied from the lesson" in attempt.evaluation.notes) is expected_copied
+    fake_chat.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # 8. --last Picks Newest Question
 # ---------------------------------------------------------------------------

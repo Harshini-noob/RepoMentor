@@ -65,6 +65,9 @@ def print_interview_summary(
     if before_after:
         out("\nTeaching cycle (before -> after):")
         for ba in before_after:
+            if ba.get("copied"):
+                out(f"  [{ba['concept']}] {ba['before']}/4 -> n/a (copied)")
+                continue
             delta = ba.get("delta", 0)
             diff_str = f"+{delta}" if delta >= 0 else f"{delta}"
             out(f"  [{ba['concept']}] {ba['before']}/4 -> {ba['after']}/4 ({diff_str})")
@@ -365,11 +368,19 @@ async def run_interview(
             item["lesson_id"] = _get_val(lesson_doc, "lesson_id")
 
             # Filter focus points: missed or partial rubric points that are not import lists
-            focus_points = [
-                _get_val(p, "point")
-                for p in missed
-                if not is_listing_point(_get_val(p, "point") or "")
-            ]
+            focus_point = next(
+                (
+                    _get_val(point, "point")
+                    for point in missed
+                    if _get_val(point, "kind") == "repo"
+                    and _get_val(point, "point")
+                    and not is_listing_point(_get_val(point, "point") or "")
+                ),
+                None,
+            )
+            if focus_point is None and missed:
+                focus_point = _get_val(missed[0], "point")
+            focus_points = [focus_point] if focus_point else []
 
             # b. follow-up
             _gen_fu = generate_followup_fn if generate_followup_fn is not None else _gen
@@ -398,6 +409,10 @@ async def run_interview(
             if followup_q is not None:
                 fu_qid = _get_val(followup_q, "question_id")
                 fu_qtext = _get_val(followup_q, "question")
+                rubric_mismatch = (
+                    "rubric may not match the question"
+                    in (_get_val(followup_q, "validation_notes") or [])
+                )
                 item["followup_question_id"] = fu_qid
                 out(f"\n{fu_qtext}\n")
 
@@ -415,6 +430,8 @@ async def run_interview(
 
                 if fu_first == "/skip":
                     out("Question skipped.")
+                elif rubric_mismatch:
+                    out("Follow-up skipped: rubric did not match the question")
                 else:
                     try:
                         fu_att_res = _eval(
@@ -489,9 +506,13 @@ async def run_interview(
 
                 retry_ev = _get_val(retry_attempt, "evaluation")
                 after_score = _get_val(retry_ev, "score") if retry_ev else 0
-                diff = after_score - (score or 0)
-                diff_str = f"+{diff}" if diff >= 0 else f"{diff}"
-                out(f"Before: {score}/4 -> After: {after_score}/4 ({diff_str})")
+                if _get_val(retry_attempt, "copied", False):
+                    out(f"Before: {score}/4 -> After: copied from the lesson (not counted)")
+                    item["copied"] = True
+                else:
+                    diff = after_score - (score or 0)
+                    diff_str = f"+{diff}" if diff >= 0 else f"{diff}"
+                    out(f"Before: {score}/4 -> After: {after_score}/4 ({diff_str})")
 
                 retry_pts = _get_val(retry_ev, "points") or []
                 retry_missed = [p for p in retry_pts if _get_val(p, "status") in ("missing", "partial")]

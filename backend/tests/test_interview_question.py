@@ -850,3 +850,76 @@ class TestNoEvalsQuestionsJsonRead:
                 f"{py_file} may reference evals/questions.json — "
                 "verify this is not a path to the eval fixture."
             )
+
+
+@pytest.mark.asyncio
+async def test_followup_rubric_matching_uses_question_and_focus_point():
+    db = TestKeyPointValidation()._db_with_single_seed()
+    data = {
+        "question": "How does database indexing improve search performance?",
+        "concept": "database-choice",
+        "key_points": [
+            {"point": "Database indexing speeds up search queries", "kind": "general"},
+            {"point": "Indexing reduces full scans for database searches", "kind": "general"},
+            {"point": "Search performance improves with selective indexes", "kind": "general"},
+        ],
+        "common_mistakes": ["Confusing indexes with backups"],
+    }
+    fake_chat = AsyncMock(return_value=_make_llm_reply(data))
+
+    question = await generate_question(
+        db,
+        "proj_test",
+        "tech",
+        1,
+        focus_points=["database indexing"],
+        chat_fn=fake_chat,
+        save=False,
+    )
+
+    assert fake_chat.await_count == 1
+    assert question.question == data["question"]
+    assert [point.point for point in question.key_points] == [
+        point["point"] for point in data["key_points"]
+    ]
+    user_message = fake_chat.call_args.args[0][1]["content"]
+    assert (
+        "Ask a simpler question (difficulty 1) about this one idea: database indexing. "
+        "Write the rubric from your own question: what a correct answer to THIS "
+        "question contains. Do not add points about other topics."
+    ) in user_message
+
+
+@pytest.mark.asyncio
+async def test_followup_rubric_mismatch_retries_once_and_adds_note():
+    db = TestKeyPointValidation()._db_with_single_seed()
+    data = {
+        "question": "How do you store records efficiently?",
+        "concept": "database-choice",
+        "key_points": [
+            {"point": "Avoid repeated network transfers", "kind": "general"},
+            {"point": "Ensure authorization checks", "kind": "general"},
+            {"point": "Keep requests efficient", "kind": "general"},
+        ],
+        "common_mistakes": ["Assuming all requests are identical"],
+    }
+    fake_chat = AsyncMock(side_effect=[
+        _make_llm_reply(data),
+        _make_llm_reply(data),
+    ])
+
+    question = await generate_question(
+        db,
+        "proj_test",
+        "tech",
+        1,
+        focus_points=["database indexing"],
+        chat_fn=fake_chat,
+        save=False,
+    )
+
+    assert fake_chat.await_count == 2
+    assert question.validation_notes[-1] == "rubric may not match the question"
+    assert fake_chat.call_args.args[0][-1]["content"] == (
+        "The rubric includes points unrelated to the question; rewrite it from the question"
+    )

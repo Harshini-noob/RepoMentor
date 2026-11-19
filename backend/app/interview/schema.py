@@ -81,3 +81,4 @@ class InterviewAttempt(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     role: Literal["initial", "followup", "retry"] = "initial"
     parent_attempt_id: str | None = None
+    copied: bool = False

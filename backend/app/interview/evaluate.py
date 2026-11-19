@@ -61,6 +61,56 @@ def _normalise(text: str) -> str:
     return t
 
 
+def _copy_words(text: str) -> list[str]:
+    """Return lowercase words after removing punctuation and collapsing whitespace."""
+    normalised = re.sub(r"[^\w\s]", " ", text.lower())
+    return re.findall(r"[^\W_]+", " ".join(normalised.split()))
+
+
+def _has_copied_five_grams(
+    answer: str,
+    lesson_text: str,
+    advice: str,
+) -> bool:
+    answer_words = _copy_words(answer)
+    if len(answer_words) < 8:
+        return False
+
+    answer_grams = [
+        tuple(answer_words[index:index + 5])
+        for index in range(len(answer_words) - 4)
+    ]
+    source_grams = {
+        tuple(words[index:index + 5])
+        for text in (lesson_text, advice)
+        for words in [_copy_words(text)]
+        for index in range(len(words) - 4)
+    }
+    if not source_grams:
+        return False
+    shared = sum(gram in source_grams for gram in answer_grams)
+    return shared / len(answer_grams) >= 0.5
+
+
+async def _retry_copy_sources(db: Any, parent_attempt_id: str) -> tuple[str, str]:
+    parent_res = db.interview_attempts.find_one(
+        {"attempt_id": parent_attempt_id}, {"_id": 0}
+    )
+    if inspect.isawaitable(parent_res):
+        parent_res = await parent_res
+    lesson_res = db.interview_lessons.find_one(
+        {"attempt_id": parent_attempt_id}, {"_id": 0}
+    )
+    if inspect.isawaitable(lesson_res):
+        lesson_res = await lesson_res
+
+    parent_evaluation = (parent_res or {}).get("evaluation") or {}
+    return (
+        (lesson_res or {}).get("text", "") or "",
+        parent_evaluation.get("advice", "") or "",
+    )
+
+
 def _quote_in_answer(quote: str | None, norm_answer: str) -> bool:
     """Check if quote is a valid substring in the normalised answer.
 
@@ -306,6 +356,13 @@ async def evaluate_answer(
     strengths = [s for s in data.get("strengths", []) if isinstance(s, str)][:2]
     advice = str(data.get("advice", "") or "")
 
+    copied = False
+    if role == "retry" and parent_attempt_id:
+        lesson_text, parent_advice = await _retry_copy_sources(db, parent_attempt_id)
+        copied = _has_copied_five_grams(answer, lesson_text, parent_advice)
+        if copied:
+            eval_notes.append("answer largely copied from the lesson")
+
     # 6. Scoring via scoring.py (never take score from model)
     coverage, score = score_evaluation(point_results, misconceptions)
 
@@ -337,6 +394,7 @@ async def evaluate_answer(
         session_id=session_id,
         role=role,
         parent_attempt_id=parent_attempt_id,
+        copied=copied,
     )
 
     # 8. Persist attempt and update learner profile

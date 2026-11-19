@@ -12,7 +12,7 @@ import pytest
 from app.interview.generate import InterviewGenerationError, generate_question
 from app.interview.lesson import generate_lesson
 from app.interview.profile import get_profile, rebuild, update_from_attempt
-from app.interview.runner import run_interview
+from app.interview.runner import print_interview_summary, run_interview
 from app.interview.schema import (
     Evaluation,
     InterviewAttempt,
@@ -292,7 +292,7 @@ async def test_followup_uses_original_seed_and_concept_and_clamped_difficulty():
     assert captured_kwargs["difficulty"] == 1  # clamped at 1
     assert captured_kwargs["concept"] == "observability"
     assert captured_kwargs["seed"] == q_init.seed
-    assert "Explain the trade-offs" in captured_kwargs["focus_points"]
+    assert captured_kwargs["focus_points"] == ["Explain the trade-offs"]
 
 
 # ---------------------------------------------------------------------------
@@ -589,6 +589,149 @@ def test_summary_before_after_and_excludes_recovered_points():
     rev_points = [r["point"] for r in summary["revise"]]
     assert "Point A" not in rev_points
     assert "Point B" in rev_points
+
+
+def test_copied_retry_is_shown_as_unscored_and_excluded_from_improvement():
+    questions = [
+        {"question_id": "q_copy", "concept": "testing", "round": "tech", "difficulty": 2},
+        {"question_id": "q_normal", "concept": "testing", "round": "tech", "difficulty": 2},
+    ]
+    attempts = [
+        {"attempt_id": "r_copy", "copied": True, "evaluation": {"points": []}},
+        {"attempt_id": "r_normal", "copied": False, "evaluation": {"points": []}},
+    ]
+    items = [
+        {
+            "question_id": "q_copy",
+            "status": "answered",
+            "score": 1,
+            "retry_attempt_id": "r_copy",
+            "before": 1,
+            "after": 4,
+        },
+        {
+            "question_id": "q_normal",
+            "status": "answered",
+            "score": 2,
+            "retry_attempt_id": "r_normal",
+            "before": 1,
+            "after": 3,
+        },
+    ]
+
+    summary = build_summary(items, questions, attempts)
+
+    assert summary["average_improvement"] == 2.0
+    assert summary["before_after"][0]["after"] == "n/a (copied)"
+    assert summary["before_after"][0]["delta"] is None
+    output: list[str] = []
+    print_interview_summary(summary, out=output.append)
+    assert any("n/a (copied)" in line for line in output)
+
+
+@pytest.mark.asyncio
+async def test_rubric_mismatched_followup_is_not_evaluated(monkeypatch):
+    db = _make_db()
+    initial_question = _make_question("q1")
+    db.interview_questions.insert_one(initial_question.model_dump(mode="json"))
+    followup_question = _make_question("q_fu").model_copy(
+        update={"validation_notes": ["rubric may not match the question"]}
+    )
+    focus_points_seen: list[str] = []
+    evaluated_roles: list[str] = []
+    output: list[str] = []
+
+    async def fake_generate(*args, **kwargs):
+        return initial_question
+
+    async def fake_generate_followup(*args, **kwargs):
+        focus_points_seen.extend(kwargs["focus_points"])
+        return followup_question
+
+    async def fake_evaluate(db, question_id, answer, **kwargs):
+        role = kwargs.get("role", "initial")
+        evaluated_roles.append(role)
+        attempt = InterviewAttempt(
+            attempt_id=f"att_{role}",
+            question_id=question_id,
+            project_id="proj",
+            concept="database-choice",
+            difficulty=2,
+            answer=answer,
+            evaluation=Evaluation(
+                points=[
+                    PointResult(id=1, point="Explain a design trade-off", kind="general", status="missing"),
+                    PointResult(id=2, point="Explain imports from app/agent/llm.py", kind="repo", status="missing"),
+                    PointResult(id=3, point="Explain cache invalidation", kind="repo", status="partial"),
+                ],
+                misconceptions=[],
+                coverage=0.5,
+                score=2,
+            ),
+            role=role,
+            parent_attempt_id=kwargs.get("parent_attempt_id"),
+        )
+        db.interview_attempts.insert_one(attempt.model_dump(mode="json"))
+        return attempt
+
+    await run_interview(
+        db,
+        "proj",
+        n=1,
+        ask_fn=AsyncMock(side_effect=[
+            "Initial response with enough explanatory detail.",
+            "Follow-up response with enough explanatory detail.",
+            "Retry response with enough explanatory detail.",
+        ]),
+        generate_fn=fake_generate,
+        generate_followup_fn=fake_generate_followup,
+        evaluate_fn=fake_evaluate,
+        lesson_fn=lambda _: {"lesson_id": "lesson1", "text": "Lesson", "notes": []},
+        out=output.append,
+    )
+
+    assert focus_points_seen == ["Explain cache invalidation"]
+    assert evaluated_roles == ["initial", "retry"]
+    assert "Follow-up skipped: rubric did not match the question" in output
+
+
+@pytest.mark.asyncio
+async def test_runner_marks_copied_retry_as_not_counted():
+    db = _make_db()
+    question = _make_question("q1")
+    db.interview_questions.insert_one(question.model_dump(mode="json"))
+    output: list[str] = []
+
+    async def fake_evaluate(db, question_id, answer, **kwargs):
+        role = kwargs.get("role", "initial")
+        attempt = _make_attempt(
+            f"att_{role}",
+            question_id,
+            score=2 if role == "initial" else 4,
+            role=role,
+            parent_attempt_id=kwargs.get("parent_attempt_id"),
+        )
+        if role == "retry":
+            attempt = attempt.model_copy(update={"copied": True})
+        db.interview_attempts.insert_one(attempt.model_dump(mode="json"))
+        return attempt
+
+    def fail_followup(*args, **kwargs):
+        raise InterviewGenerationError("No valid follow-up")
+
+    await run_interview(
+        db,
+        "proj",
+        n=1,
+        ask_fn=AsyncMock(side_effect=["Initial answer", "Retry answer"]),
+        generate_fn=lambda *args, **kwargs: question,
+        generate_followup_fn=fail_followup,
+        evaluate_fn=fake_evaluate,
+        lesson_fn=lambda _: {"lesson_id": "lesson1", "text": "Lesson", "notes": []},
+        out=output.append,
+    )
+
+    assert "Before: 2/4 -> After: copied from the lesson (not counted)" in output
 
 
 # ---------------------------------------------------------------------------

@@ -85,21 +85,29 @@ def build_summary(
         if _get_val(it, "lesson_id"):
             lessons_given += 1
 
+        retry_aid = _get_val(it, "retry_attempt_id")
+        retry_attempt = attempts_map.get(retry_aid) if retry_aid else None
+        copied_retry = bool(
+            _get_val(retry_attempt, "copied", False) or _get_val(it, "copied", False)
+        )
+
         b = _get_val(it, "before")
         a = _get_val(it, "after")
-        if b is not None and a is not None:
+        if b is not None and (a is not None or copied_retry):
             q_for_ba = questions_map.get(qid) if qid else None
             concept_ba = _get_val(q_for_ba, "concept") or ""
             q_text_ba = _get_val(q_for_ba, "question") or ""
-            delta = a - b
-            deltas.append(delta)
+            delta = None if copied_retry else a - b
+            if delta is not None:
+                deltas.append(delta)
             before_after.append({
                 "question_id": qid,
                 "question": q_text_ba,
                 "concept": concept_ba,
                 "before": b,
-                "after": a,
+                "after": "n/a (copied)" if copied_retry else a,
                 "delta": delta,
+                "copied": copied_retry,
             })
 
         q = questions_map.get(qid) if qid else None
@@ -115,8 +123,6 @@ def build_summary(
                     concept_scores[concept].append(score)
 
             # Check if points were recovered (covered) in retry attempt
-            retry_aid = _get_val(it, "retry_attempt_id")
-            retry_attempt = attempts_map.get(retry_aid) if retry_aid else None
             covered_in_retry: set[str] = set()
             if retry_attempt:
                 ret_ev = _get_val(retry_attempt, "evaluation")
