@@ -55,6 +55,7 @@ uvicorn app.main:app --reload --port 8000
 
 ### API endpoints
 
+#### Projects & Repository Analysis
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/projects` | Register a GitHub repository and start background ingestion |
@@ -63,6 +64,35 @@ uvicorn app.main:app --reload --port 8000
 | `GET` | `/projects/{id}/dependencies` | List parsed dependencies |
 | `GET` | `/projects/{id}/facts` | List statically derived code facts; supports `kind`, `limit`, and `skip` |
 | `GET` | `/projects/{id}/timeline` | Get commit timeline and related history metrics |
+
+#### Project Dossier
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/projects/{id}/dossier/summary` | Summary of all 9 dossier sections and claim counts |
+| `GET` | `/projects/{id}/dossier/sections/{name}` | Detailed claims and evidence for a specific section |
+| `PATCH` | `/projects/{id}/dossier/sections/{name}/claims/{index}` | Edit or revise a specific dossier claim |
+
+#### Mentor Chat (SSE Streaming)
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/projects/{id}/chat/sessions` | Create a new mentor chat session |
+| `GET` | `/projects/{id}/chat/sessions` | List newest chat sessions |
+| `GET` | `/projects/{id}/chat/sessions/{session_id}` | Retrieve chat session history |
+| `POST` | `/projects/{id}/chat` | SSE stream for mentor answers with live tool execution traces |
+
+#### Learner Profile & Interview State Machine
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/projects/{id}/profile` | Retrieve learner profile and revision priorities |
+| `GET` | `/projects/{id}/interview/plan` | Preview adaptive interview plan without saving |
+| `GET` | `/projects/{id}/interview/sessions` | List past interview sessions |
+| `POST` | `/projects/{id}/interview/sessions` | Initialize a new interview state machine session |
+| `GET` | `/projects/{id}/interview/sessions/{session_id}/state` | Get current state (sanitized without rubrics) |
+| `POST` | `/projects/{id}/interview/sessions/{session_id}/next` | Advance state machine (question, lesson, or summary) |
+| `POST` | `/projects/{id}/interview/sessions/{session_id}/answer` | Submit answer and trigger evaluation/teaching cycle |
+| `POST` | `/projects/{id}/interview/sessions/{session_id}/skip` | Skip the active question |
+| `GET` | `/projects/{id}/interview/sessions/{session_id}/report` | Final interview report and score improvement breakdown |
+
 
 ## CLI
 
