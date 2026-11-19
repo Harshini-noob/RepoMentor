@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     mongodb_uri: str = "mongodb://localhost:27017"
     mongodb_db: str = "repomentor"
     github_token: str | None = None
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     # Generic OpenAI-compatible LLM provider (Gemini, Groq, etc.)
     llm_api_key: str | None = None

@@ -1,9 +1,14 @@
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.analysis import router as analysis_router
+from app.api.dossier_api import router as dossier_router
+from app.api.interview_api import router as interview_router
+from app.api.mentor_api import router as mentor_router
 from app.api.projects import router as projects_router
+from app.config import get_settings
 from app.core.db import get_db
 from app.core.repositories import init_indexes
 
@@ -21,8 +26,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="RepoMentor API", lifespan=lifespan)
+
+# CORS configuration
+origins = [o.strip() for o in get_settings().cors_origins.split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["*"],
+)
+
 app.include_router(projects_router)
 app.include_router(analysis_router)
+app.include_router(mentor_router)
+app.include_router(dossier_router)
+app.include_router(interview_router)
 
 
 @app.get("/health")
