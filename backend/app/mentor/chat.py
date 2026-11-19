@@ -52,6 +52,11 @@ async def ask(
         **kwargs,
     )
 
+    if run_result.final_answer:
+        run_result.final_answer = (
+            run_result.final_answer.replace("\u202f", " ").replace("\u00a0", " ")
+        )
+
     if run_result.stop_reason == "answered":
         tools_used = sorted(list({s.tool for s in run_result.steps if s.tool and s.tool != "error"}))
         meta = {

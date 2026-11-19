@@ -524,3 +524,33 @@ async def test_chat_failover_on_long_429(monkeypatch) -> None:
         )
     assert set(call_models) == {"primary-model"}
     assert not any("switching" in e for e in events)
+
+
+@pytest.mark.asyncio
+async def test_ask_cleans_non_breaking_and_narrow_spaces(monkeypatch) -> None:
+    client = AsyncMongoMockClient()
+    db = client["repomentor_test"]
+    session_id = await create_session(db, "proj-spaces")
+
+    async def fake_run_agent(*args, **kwargs):
+        class FakeRun:
+            final_answer = "[Fact] Code in main.py\u202flines\u00a010-20"
+            stop_reason = "answered"
+            total_tokens = 42
+            steps = []
+        return FakeRun()
+
+    monkeypatch.setattr("app.mentor.chat.run_agent", fake_run_agent)
+
+    res = await ask(db=db, project_id="proj-spaces", session_id=session_id, message="Tell me")
+    assert res.final_answer == "[Fact] Code in main.py lines 10-20"
+    assert "\u202f" not in res.final_answer
+    assert "\u00a0" not in res.final_answer
+
+    session = await get_session(db, session_id)
+    last_msg = session["messages"][-1]
+    assert last_msg["role"] == "assistant"
+    assert last_msg["content"] == "[Fact] Code in main.py lines 10-20"
+    assert "\u202f" not in last_msg["content"]
+    assert "\u00a0" not in last_msg["content"]
+

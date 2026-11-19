@@ -1,29 +1,48 @@
-"""Interview API router (read-only endpoints)."""
+"""Interview API router."""
 
 from __future__ import annotations
 
 import inspect
+import logging
 from typing import Any
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.api.locks import get_model_lock
 from app.api.models import (
+    InterviewActionResponse,
+    InterviewAnswerRequest,
+    InterviewEvaluationResponse,
     InterviewPlanResponse,
     InterviewPlanSlot,
     InterviewReportResponse,
+    InterviewSessionCreateRequest,
+    InterviewSessionCreateResponse,
     InterviewSessionSummaryItem,
+    InterviewSkipResponse,
+    InterviewStateResponse,
     ProfileConceptItem,
     ProfileMissItem,
     ProfileResponse,
 )
 from app.core.db import get_db
+from app.interview.engine import (
+    EngineStateError,
+    get_state,
+    next_action,
+    skip,
+    start,
+    submit_answer,
+)
 from app.interview.plan import build_plan as build_adaptive_plan
 from app.interview.profile import get_profile, weak_concepts
 from app.interview.seeds import find_seed_for_concept, pick_seed
 from app.interview.session import ROUNDS_ORDER, get_session as get_interview_session
 from app.interview.summary import build_summary
+
+logger = logging.getLogger("repomentor.api.interview")
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["interview"])
 
@@ -44,6 +63,18 @@ async def _get_project_or_404(project_id: str, db: Any) -> dict[str, Any]:
             detail=f"Project with ID '{project_id}' not found",
         )
     return project
+
+
+async def _get_session_or_404(project_id: str, session_id: str, db: Any) -> dict[str, Any]:
+    await _get_project_or_404(project_id, db)
+    session = await get_interview_session(db, session_id)
+    if not session or session.get("project_id") != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Interview session '{session_id}' not found for project '{project_id}'",
+        )
+    return session
+
 
 
 @router.get(
@@ -209,13 +240,7 @@ async def get_interview_session_report(
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> InterviewReportResponse:
     """Retrieve the report for an interview session as JSON (no model call)."""
-    await _get_project_or_404(project_id, db)
-    session = await get_interview_session(db, session_id)
-    if not session or session.get("project_id") != project_id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Interview session '{session_id}' not found for project '{project_id}'",
-        )
+    session = await _get_session_or_404(project_id, session_id, db)
 
     items = session.get("items", [])
     q_ids = [it["question_id"] for it in items if it.get("question_id")]
@@ -266,3 +291,153 @@ async def get_interview_session_report(
         before_after=summary.get("before_after", []),
         average_improvement=summary.get("average_improvement"),
     )
+
+
+@router.post(
+    "/interview/sessions",
+    response_model=InterviewSessionCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_interview_session(
+    project_id: str,
+    payload: InterviewSessionCreateRequest = Body(default_factory=InterviewSessionCreateRequest),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> InterviewSessionCreateResponse:
+    """Create a new interview session. Does not hold the model lock."""
+    await _get_project_or_404(project_id, db)
+    session = await start(
+        db=db,
+        project_id=project_id,
+        questions=payload.questions,
+        difficulty=payload.difficulty,
+        adaptive=payload.adaptive,
+        teach=payload.teach,
+        teach_below=payload.teach_below,
+        max_lessons=payload.max_lessons,
+    )
+    return InterviewSessionCreateResponse(
+        session_id=session["session_id"],
+        plan=session.get("plan", []),
+        status=session.get("status", "active"),
+    )
+
+
+@router.get(
+    "/interview/sessions/{session_id}/state",
+    response_model=InterviewStateResponse,
+)
+async def get_interview_session_state(
+    project_id: str,
+    session_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> InterviewStateResponse:
+    """Retrieve the current state of an interview session."""
+    await _get_session_or_404(project_id, session_id, db)
+    state = await get_state(db, session_id)
+    return InterviewStateResponse(**state)
+
+
+@router.post(
+    "/interview/sessions/{session_id}/next",
+    response_model=InterviewActionResponse,
+    response_model_exclude_none=True,
+)
+async def next_interview_action(
+    project_id: str,
+    session_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> InterviewActionResponse:
+    """Advance to the next action (question, lesson, or summary). Takes the model lock."""
+    await _get_session_or_404(project_id, session_id, db)
+    lock = get_model_lock()
+    if lock.locked():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="busy: another request is using the model",
+        )
+    await lock.acquire()
+    try:
+        action = await next_action(db, session_id)
+        return InterviewActionResponse(**action)
+    except EngineStateError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"cannot advance: {e}",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error during interview next_action")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while generating the next action.",
+        )
+    finally:
+        lock.release()
+
+
+@router.post(
+    "/interview/sessions/{session_id}/answer",
+    response_model=InterviewEvaluationResponse,
+    response_model_exclude_none=True,
+)
+async def submit_interview_answer(
+    project_id: str,
+    session_id: str,
+    payload: InterviewAnswerRequest,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> InterviewEvaluationResponse:
+    """Submit an answer to the current pending question. Takes the model lock."""
+    await _get_session_or_404(project_id, session_id, db)
+    lock = get_model_lock()
+    if lock.locked():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="busy: another request is using the model",
+        )
+    await lock.acquire()
+    try:
+        evaluation = await submit_answer(
+            db=db,
+            session_id=session_id,
+            question_id=payload.question_id,
+            answer=payload.answer,
+        )
+        return InterviewEvaluationResponse(**evaluation)
+    except EngineStateError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"cannot advance: {e}",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error during interview submit_answer")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while evaluating the answer.",
+        )
+    finally:
+        lock.release()
+
+
+@router.post(
+    "/interview/sessions/{session_id}/skip",
+    response_model=InterviewSkipResponse,
+)
+async def skip_interview_question(
+    project_id: str,
+    session_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> InterviewSkipResponse:
+    """Skip the current pending question. Does not hold the model lock."""
+    await _get_session_or_404(project_id, session_id, db)
+    try:
+        res = await skip(db, session_id)
+        return InterviewSkipResponse(**res)
+    except EngineStateError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"cannot advance: {e}",
+        )
+

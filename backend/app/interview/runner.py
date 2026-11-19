@@ -1,17 +1,24 @@
 """Interview session runner.
 
 Executes a multi-question interview session, recording items, handling /skip and /quit,
-and generating the final summary.
+and generating the final summary. Refactored to be a thin loop over app.interview.engine.
 """
 
 from __future__ import annotations
 
 import asyncio
 import inspect
-import re
 import sys
 from typing import Any, Callable
 
+from app.interview.engine import (
+    EngineStateError,
+    get_state,
+    next_action,
+    skip,
+    start,
+    submit_answer,
+)
 from app.interview.evaluate import evaluate_answer
 from app.interview.filters import is_listing_point
 from app.interview.generate import InterviewGenerationError, generate_question
@@ -120,8 +127,11 @@ async def run_interview(
     generate_followup_fn: Callable[..., Any] | None = None,
     lesson_fn: Callable[..., Any] | None = None,
     adaptive: bool = True,
+    **kwargs: Any,
 ) -> dict[str, Any]:
-    """Execute an interview session."""
+    """Execute an interview session as a thin presentation loop over app.interview.engine."""
+    teach_below = kwargs.get("teach_below", teach_threshold)
+
     # 1. Create or load the session
     if session_id is not None:
         session = await get_session(db, session_id)
@@ -131,13 +141,37 @@ async def run_interview(
             raise ValueError(
                 f"Session '{session_id}' belongs to project '{session.get('project_id')}', not '{project_id}'."
             )
+        # Ensure engine fields exist if resuming an older session
+        updates = {}
+        if "stage" not in session:
+            updates["stage"] = "need_question"
+        if "teach" not in session:
+            updates["teach"] = teach
+        if "teach_below" not in session:
+            updates["teach_below"] = teach_below
+        if "max_lessons" not in session:
+            updates["max_lessons"] = max_lessons
+        if "lessons_given" not in session:
+            updates["lessons_given"] = 0
+        if updates:
+            res = db.interview_sessions.update_one(
+                {"session_id": session_id},
+                {"$set": updates},
+            )
+            if inspect.isawaitable(res):
+                await res
     else:
-        session = await create_session(db, project_id, n=n, base_difficulty=base_difficulty, adaptive=adaptive)
-
-    plan = session.get("plan", [])
-    _gen = generate_fn if generate_fn is not None else generate_question
-    _eval = evaluate_fn if evaluate_fn is not None else evaluate_answer
-    lessons_given = 0
+        session = await start(
+            db,
+            project_id,
+            questions=n,
+            difficulty=base_difficulty,
+            adaptive=adaptive,
+            teach=teach,
+            teach_below=teach_below,
+            max_lessons=max_lessons,
+        )
+        session_id = session["session_id"]
 
     async def _read_ans() -> str:
         if ask_fn is not None:
@@ -147,439 +181,150 @@ async def run_interview(
             return ans_res
         return await asyncio.to_thread(_default_ask_fn)
 
-    # 2. Main slot loop
-    while session.get("current", 0) < len(plan):
-        idx = session["current"]
-        slot = plan[idx]
-        slot_num = idx + 1
-        concept = slot.get("concept")
-        r = slot.get("round")
-        d = slot.get("difficulty", 1)
+    # 2. Main presentation loop
+    while True:
+        action = await next_action(
+            db,
+            session_id,
+            generate_fn=generate_fn,
+            lesson_fn=lesson_fn,
+            generate_followup_fn=generate_followup_fn,
+        )
+        act_type = action.get("action")
 
-        seed = None
-        gen_concept = None
-        if concept:
-            raw_dossier = db.dossiers.find_one({"project_id": project_id}, {"_id": 0})
-            dossier = await raw_dossier if inspect.isawaitable(raw_dossier) else raw_dossier
+        if act_type == "finished":
+            print_interview_summary(action["summary"], out=out)
+            latest = await get_session(db, session_id)
+            return latest if latest is not None else session
 
-            asked: list[dict] = []
-            cur = db.interview_questions.find({"project_id": project_id}, {"_id": 0})
-            if hasattr(cur, "to_list"):
-                asked = await cur.to_list(None)
-            elif inspect.isawaitable(cur):
-                asked = list(await cur)
-            else:
-                asked = list(cur)
-
-            seed_result = find_seed_for_concept(dossier, concept, asked) if dossier else None
-            if seed_result is not None:
-                seed, seed_round = seed_result
-                r = seed_round
-                gen_concept = concept
-            else:
-                if not r:
-                    r = ROUNDS_ORDER[idx % len(ROUNDS_ORDER)]
-                note = f"no seed for {concept}, used round order"
-                session.setdefault("notes", []).append(note)
-                note_res = db.interview_sessions.update_one(
-                    {"session_id": session["session_id"]},
-                    {"$push": {"notes": note}},
-                )
-                if inspect.isawaitable(note_res):
-                    await note_res
-        else:
-            if not r:
-                r = ROUNDS_ORDER[idx % len(ROUNDS_ORDER)]
-
-        out(f"\nQuestion {slot_num} of {len(plan)}, {r}, difficulty {d}")
-
-        # Generate question with single retry on InterviewGenerationError
-        async def _call_gen(*a, **k):
-            try:
-                res = _gen(*a, **k)
-            except TypeError as te:
-                if "unexpected keyword argument" in str(te):
-                    res = _gen(a[0], a[1], round_name=k.get("round_name"), difficulty=k.get("difficulty"))
-                else:
-                    raise
-            return (await res) if inspect.isawaitable(res) else res
-
-        gen_kwargs: dict[str, Any] = {
-            "round_name": r,
-            "difficulty": d,
-            "save": True,
-        }
-        if seed is not None:
-            gen_kwargs["seed"] = seed
-        if gen_concept is not None:
-            gen_kwargs["concept"] = gen_concept
-
-        q = None
-        try:
-            q = await _call_gen(db, project_id, **gen_kwargs)
-        except InterviewGenerationError:
-            try:
-                q = await _call_gen(db, project_id, **gen_kwargs)
-            except InterviewGenerationError as exc:
-                item = {
-                    "question_id": None,
-                    "attempt_id": None,
-                    "status": "no_question",
-                    "score": None,
-                }
-                await record_item(
-                    db,
-                    session["session_id"],
-                    item,
-                    note=f"Generation failed for slot {slot_num}: {exc}",
-                )
-                await advance(db, session["session_id"])
-                session["current"] += 1
-                session.setdefault("items", []).append(item)
-                out(f"Could not generate question for slot {slot_num}.")
-                continue
-
-        question_text = _get_val(q, "question")
-        qid = _get_val(q, "question_id")
-
-        # Print the question text only (not the rubric)
-        out(f"\n{question_text}\n")
-
-        # Read the candidate's answer
-        ans = await _read_ans()
-        first_line = ans.strip().splitlines()[0].strip() if ans.strip().splitlines() else ans.strip()
-
-        if first_line == "/quit":
-            out("Session saved. You can resume later.")
-            return session
-
-        if first_line == "/skip":
-            item = {
-                "question_id": qid,
-                "attempt_id": None,
-                "status": "skipped",
-                "score": None,
-            }
-            await record_item(db, session["session_id"], item)
-            await advance(db, session["session_id"])
-            session["current"] += 1
-            session.setdefault("items", []).append(item)
-            out("Question skipped.")
+        if act_type == "lesson":
+            lesson_text = action.get("text", "")
+            out(f"\n{lesson_text}\n")
             continue
 
-        # Evaluate the answer
-        try:
-            att_res = _eval(
-                db,
-                question_id=qid,
-                answer=ans,
-                save=True,
-                session_id=session["session_id"],
-                role="initial",
-            )
-        except TypeError:
-            try:
-                att_res = _eval(
-                    db,
-                    question_id=qid,
-                    answer=ans,
-                    save=True,
-                    session_id=session["session_id"],
-                )
-            except TypeError:
-                att_res = _eval(
-                    db,
-                    question_id=qid,
-                    answer=ans,
-                    save=True,
-                )
-        attempt = (await att_res) if inspect.isawaitable(att_res) else att_res
+        if act_type == "question":
+            kind = action.get("kind", "initial")
+            slot_num = action.get("slot")
+            total = action.get("total")
+            r = action.get("round")
+            d = action.get("difficulty")
+            text = action.get("text")
+            qid = action.get("question_id")
 
-        ev = _get_val(attempt, "evaluation")
-        score = _get_val(ev, "score") if ev else None
-        out(f"\nScore: {score}/4")
+            if kind == "initial":
+                out(f"\nQuestion {slot_num} of {total}, {r}, difficulty {d}")
+                out(f"\n{text}\n")
+            elif kind == "followup":
+                out(f"\n{text}\n")
+            elif kind == "retry":
+                out(f"\nNow the original question again:\n{text}\n")
 
-        unverified = _get_val(ev, "unverified") or []
-        if unverified:
-            out("\nCheck these against your repo:")
-            for u in unverified:
-                u_q = _get_val(u, "quote")
-                u_w = _get_val(u, "why")
-                out(f'  - "{u_q}": {u_w}')
+            ans = await _read_ans()
+            first_line = ans.strip().splitlines()[0].strip() if ans.strip().splitlines() else ans.strip()
 
-        pts = _get_val(ev, "points") or []
-        missed = [p for p in pts if _get_val(p, "status") in ("missing", "partial")]
-        if missed:
-            out("Missed / partial:")
-            for p in missed:
-                p_text = _get_val(p, "point")
-                p_kind = _get_val(p, "kind")
-                out(f"  [{p_kind}] {p_text}")
+            if first_line == "/quit":
+                s_cur = await get_session(db, session_id)
+                cycle = (s_cur or {}).get("cycle")
+                if cycle and kind in ("followup", "retry"):
+                    item = {
+                        "question_id": cycle.get("original_question_id"),
+                        "attempt_id": cycle.get("initial_attempt_id"),
+                        "status": "answered",
+                        "score": cycle.get("before"),
+                        "lesson_id": cycle.get("lesson_id"),
+                        "followup_question_id": cycle.get("followup_question_id"),
+                        "followup_attempt_id": cycle.get("followup_attempt_id"),
+                        "cycle_note": "cycle interrupted",
+                    }
+                    await record_item(db, session_id, item)
+                    await advance(db, session_id)
+                    res_up = db.interview_sessions.update_one(
+                        {"session_id": session_id},
+                        {"$set": {"cycle": None, "pending": None, "stage": "need_question"}},
+                    )
+                    if inspect.isawaitable(res_up):
+                        await res_up
+                out("Session saved. You can resume later.")
+                latest = await get_session(db, session_id)
+                return latest if latest is not None else session
 
-        misconceptions = _get_val(ev, "misconceptions") or []
-        if misconceptions:
-            out("Misconceptions:")
-            for m in misconceptions:
-                quote = _get_val(m, "quote")
-                why = _get_val(m, "why")
-                s_line = _get_val(m, "seed_line")
-                contra = f" (contradicts repo seed line {s_line})" if s_line is not None else ""
-                out(f'  - "{quote}": {why}{contra}')
-
-        advice = _get_val(ev, "advice")
-        if advice:
-            out(f"Advice: {advice}")
-
-        attempt_id = _get_val(attempt, "attempt_id")
-        item = {
-            "question_id": qid,
-            "attempt_id": attempt_id,
-            "status": "answered",
-            "score": score,
-        }
-
-        # Teaching cycle if score <= teach_threshold, teach is True, and lessons_given < max_lessons
-        if score is not None and score <= teach_threshold and teach and lessons_given < max_lessons:
-            # a. lesson = generate_lesson(attempt) and print it. If it fails, record cycle_note and continue to the next question.
-            lesson_doc = None
-            try:
-                if lesson_fn is not None:
-                    try:
-                        lesson_res = lesson_fn(attempt)
-                    except TypeError:
-                        lesson_res = lesson_fn(db, attempt_id=attempt_id)
-                else:
-                    from app.interview.lesson import generate_lesson
-                    lesson_res = generate_lesson(db, attempt_id=attempt_id, project_id=project_id)
-                if inspect.isawaitable(lesson_res):
-                    lesson_doc = await lesson_res
-                else:
-                    lesson_doc = lesson_res
-            except Exception as exc:
-                item["cycle_note"] = f"lesson failed: {exc}"
-                await record_item(db, session["session_id"], item)
-                await advance(db, session["session_id"])
-                session["current"] += 1
-                session.setdefault("items", []).append(item)
+            if first_line == "/skip":
+                await skip(db, session_id)
+                out("Question skipped.")
                 continue
 
-            lesson_text = _get_val(lesson_doc, "text") or ""
-            out(f"\n{lesson_text}\n")
-            item["lesson_id"] = _get_val(lesson_doc, "lesson_id")
+            # Check if rubric mismatch on followup question:
+            s_cur = await get_session(db, session_id)
+            cycle = (s_cur or {}).get("cycle") or {}
+            fu_val_notes = cycle.get("followup_validation_notes") or []
+            if not fu_val_notes:
+                q_doc = db.interview_questions.find_one({"question_id": qid})
+                if inspect.isawaitable(q_doc):
+                    q_doc = await q_doc
+                fu_val_notes = _get_val(q_doc, "validation_notes") or []
 
-            # Filter focus points: missed or partial rubric points that are not import lists
-            focus_point = next(
-                (
-                    _get_val(point, "point")
-                    for point in missed
-                    if _get_val(point, "kind") == "repo"
-                    and _get_val(point, "point")
-                    and not is_listing_point(_get_val(point, "point") or "")
-                ),
-                None,
+            rubric_mismatch = (
+                kind == "followup"
+                and "rubric may not match the question" in fu_val_notes
             )
-            if focus_point is None and missed:
-                focus_point = _get_val(missed[0], "point")
-            focus_points = [focus_point] if focus_point else []
+            if rubric_mismatch:
+                await skip(db, session_id)
+                out("Follow-up skipped: rubric did not match the question")
+                continue
 
-            # b. follow-up
-            _gen_fu = generate_followup_fn if generate_followup_fn is not None else _gen
-            followup_q = None
-            try:
-                fu_res = _gen_fu(
-                    db,
-                    project_id,
-                    round_name=r,
-                    difficulty=max(1, d - 1),
-                    seed=_get_val(q, "seed"),
-                    focus_points=focus_points,
-                    avoid_question=question_text,
-                    parent_question_id=qid,
-                    concept=_get_val(q, "concept") or concept,
-                    save=True,
-                )
-                if inspect.isawaitable(fu_res):
-                    followup_q = await fu_res
+            eval_res = await submit_answer(
+                db,
+                session_id,
+                question_id=qid,
+                answer=ans,
+                evaluate_fn=evaluate_fn,
+            )
+
+            role = eval_res.get("role")
+            if role == "retry":
+                before = eval_res.get("before")
+                after = eval_res.get("after")
+                if eval_res.get("copied", False):
+                    out(f"Before: {before}/4 -> After: copied from the lesson (not counted)")
                 else:
-                    followup_q = fu_res
-            except InterviewGenerationError:
-                item["cycle_note"] = "no follow-up question"
-                followup_q = None
-
-            if followup_q is not None:
-                fu_qid = _get_val(followup_q, "question_id")
-                fu_qtext = _get_val(followup_q, "question")
-                rubric_mismatch = (
-                    "rubric may not match the question"
-                    in (_get_val(followup_q, "validation_notes") or [])
-                )
-                item["followup_question_id"] = fu_qid
-                out(f"\n{fu_qtext}\n")
-
-                fu_ans = await _read_ans()
-                fu_first = fu_ans.strip().splitlines()[0].strip() if fu_ans.strip().splitlines() else fu_ans.strip()
-
-                if fu_first == "/quit":
-                    item["cycle_note"] = "cycle interrupted"
-                    await record_item(db, session["session_id"], item)
-                    await advance(db, session["session_id"])
-                    session["current"] += 1
-                    session.setdefault("items", []).append(item)
-                    out("Session saved. You can resume later.")
-                    return session
-
-                if fu_first == "/skip":
-                    out("Question skipped.")
-                elif rubric_mismatch:
-                    out("Follow-up skipped: rubric did not match the question")
-                else:
-                    try:
-                        fu_att_res = _eval(
-                            db,
-                            question_id=fu_qid,
-                            answer=fu_ans,
-                            save=True,
-                            session_id=session["session_id"],
-                            role="followup",
-                            parent_attempt_id=attempt_id,
-                        )
-                    except TypeError:
-                        fu_att_res = _eval(
-                            db,
-                            question_id=fu_qid,
-                            answer=fu_ans,
-                            save=True,
-                            role="followup",
-                            parent_attempt_id=attempt_id,
-                        )
-                    fu_attempt = (await fu_att_res) if inspect.isawaitable(fu_att_res) else fu_att_res
-                    item["followup_attempt_id"] = _get_val(fu_attempt, "attempt_id")
-
-                    fu_ev = _get_val(fu_attempt, "evaluation")
-                    fu_score = _get_val(fu_ev, "score") if fu_ev else None
-                    out(f"\nScore: {fu_score}/4")
-                    fu_pts = _get_val(fu_ev, "points") or []
-                    fu_missed = [p for p in fu_pts if _get_val(p, "status") in ("missing", "partial")]
-                    if fu_missed:
-                        out("Missed / partial:")
-                        for p in fu_missed:
-                            out(f"  [{_get_val(p, 'kind')}] {_get_val(p, 'point')}")
-
-            # c. retry: print "Now the original question again:" and the original question text
-            out(f"\nNow the original question again:\n{question_text}\n")
-            ret_ans = await _read_ans()
-            ret_first = ret_ans.strip().splitlines()[0].strip() if ret_ans.strip().splitlines() else ret_ans.strip()
-
-            if ret_first == "/quit":
-                item["cycle_note"] = "cycle interrupted"
-                await record_item(db, session["session_id"], item)
-                await advance(db, session["session_id"])
-                session["current"] += 1
-                session.setdefault("items", []).append(item)
-                out("Session saved. You can resume later.")
-                return session
-
-            if ret_first == "/skip":
-                out("Question skipped.")
-            else:
-                try:
-                    ret_att_res = _eval(
-                        db,
-                        question_id=qid,
-                        answer=ret_ans,
-                        save=True,
-                        session_id=session["session_id"],
-                        role="retry",
-                        parent_attempt_id=attempt_id,
-                    )
-                except TypeError:
-                    ret_att_res = _eval(
-                        db,
-                        question_id=qid,
-                        answer=ret_ans,
-                        save=True,
-                        role="retry",
-                        parent_attempt_id=attempt_id,
-                    )
-                retry_attempt = (await ret_att_res) if inspect.isawaitable(ret_att_res) else ret_att_res
-                item["retry_attempt_id"] = _get_val(retry_attempt, "attempt_id")
-
-                retry_ev = _get_val(retry_attempt, "evaluation")
-                after_score = _get_val(retry_ev, "score") if retry_ev else 0
-                if _get_val(retry_attempt, "copied", False):
-                    out(f"Before: {score}/4 -> After: copied from the lesson (not counted)")
-                    item["copied"] = True
-                else:
-                    diff = after_score - (score or 0)
+                    diff = (after or 0) - (before or 0)
                     diff_str = f"+{diff}" if diff >= 0 else f"{diff}"
-                    out(f"Before: {score}/4 -> After: {after_score}/4 ({diff_str})")
+                    out(f"Before: {before}/4 -> After: {after}/4 ({diff_str})")
 
-                retry_pts = _get_val(retry_ev, "points") or []
-                retry_missed = [p for p in retry_pts if _get_val(p, "status") in ("missing", "partial")]
-                if retry_missed:
+                pts = eval_res.get("points") or []
+                still_missed = [p for p in pts if p.get("status") in ("missing", "partial")]
+                if still_missed:
                     out("Still missing:")
-                    for p in retry_missed:
-                        out(f"  [{_get_val(p, 'kind')}] {_get_val(p, 'point')}")
+                    for p in still_missed:
+                        out(f"  [{p.get('kind')}] {p.get('point')}")
+            else:
+                score = eval_res.get("score")
+                out(f"\nScore: {score}/4")
 
-                # d. record before and after, call record_teaching, store all ids in the item, and count one lesson.
-                item["before"] = score
-                item["after"] = after_score
-                try:
-                    from app.interview.profile import record_teaching
-                    rec_res = record_teaching(db, project_id, _get_val(q, "concept"), score, after_score)
-                    if inspect.isawaitable(rec_res):
-                        await rec_res
-                except Exception:
-                    pass
+                unverified = eval_res.get("unverified") or []
+                if unverified:
+                    out("\nCheck these against your repo:")
+                    for u in unverified:
+                        out(f'  - "{u.get("quote")}": {u.get("why")}')
 
-            lessons_given += 1
+                pts = eval_res.get("points") or []
+                missed = [p for p in pts if p.get("status") in ("missing", "partial")]
+                if missed:
+                    out("Missed / partial:")
+                    for p in missed:
+                        out(f"  [{p.get('kind')}] {p.get('point')}")
 
-        await record_item(db, session["session_id"], item)
-        await advance(db, session["session_id"])
-        session["current"] += 1
-        session.setdefault("items", []).append(item)
+                misconceptions = eval_res.get("misconceptions") or []
+                if misconceptions:
+                    out("Misconceptions:")
+                    for m in misconceptions:
+                        contra = (
+                            f" (contradicts repo seed line {m.get('seed_line')})"
+                            if m.get("seed_line") is not None
+                            else ""
+                        )
+                        out(f'  - "{m.get("quote")}": {m.get("why")}{contra}')
 
-    # 3. Finish session and print summary
-    await finish(db, session["session_id"])
-    session["status"] = "finished"
-
-    # Fetch questions and attempts to build summary
-    items = session.get("items", [])
-    q_ids_set: set[str] = set()
-    a_ids_set: set[str] = set()
-    for it in items:
-        for k in ("question_id", "followup_question_id"):
-            val = it.get(k)
-            if val:
-                q_ids_set.add(val)
-        for k in ("attempt_id", "followup_attempt_id", "retry_attempt_id"):
-            val = it.get(k)
-            if val:
-                a_ids_set.add(val)
-
-    q_ids = list(q_ids_set)
-    a_ids = list(a_ids_set)
-
-    questions: list[Any] = []
-    if q_ids:
-        q_cur = db.interview_questions.find({"question_id": {"$in": q_ids}})
-        if hasattr(q_cur, "to_list"):
-            questions = await q_cur.to_list(len(q_ids))
-        elif inspect.isawaitable(q_cur):
-            questions = list(await q_cur)
-        else:
-            questions = list(q_cur)
-
-    attempts: list[Any] = []
-    if a_ids:
-        a_cur = db.interview_attempts.find({"attempt_id": {"$in": a_ids}})
-        if hasattr(a_cur, "to_list"):
-            attempts = await a_cur.to_list(len(a_ids))
-        elif inspect.isawaitable(a_cur):
-            attempts = list(await a_cur)
-        else:
-            attempts = list(a_cur)
-
-    summary = build_summary(items, questions, attempts)
-    print_interview_summary(summary, out=out)
-    return session
+                advice = eval_res.get("advice")
+                if advice:
+                    out(f"Advice: {advice}")

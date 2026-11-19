@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.agent.state import TraceStep
+from app.api.locks import get_model_lock
 from app.api.models import (
     ChatMessageItem,
     ChatRequest,
@@ -29,7 +30,7 @@ logger = logging.getLogger("repomentor.api.mentor")
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["mentor"])
 
-_chat_lock = asyncio.Lock()
+_chat_lock = get_model_lock()
 
 
 async def _get_project_or_404(project_id: str, db: Any) -> dict[str, Any]:
@@ -165,7 +166,7 @@ async def chat_stream(
     if _chat_lock.locked():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="busy: another chat is running",
+            detail="busy: another request is using the model",
         )
 
     await _chat_lock.acquire()
@@ -198,9 +199,10 @@ async def chat_stream(
                 on_step=on_step,
                 on_event=on_event,
             )
+            clean_answer = (run_res.final_answer or "").replace("\u202f", " ").replace("\u00a0", " ")
             await queue.put({
                 "type": "answer",
-                "text": run_res.final_answer or "",
+                "text": clean_answer,
                 "stop_reason": run_res.stop_reason,
                 "tokens": run_res.total_tokens,
             })

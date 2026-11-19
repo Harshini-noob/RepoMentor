@@ -47,6 +47,9 @@ async def create_session(
     n: int = 5,
     base_difficulty: int = 2,
     adaptive: bool = True,
+    teach: bool = True,
+    teach_below: int = 2,
+    max_lessons: int = 2,
 ) -> dict[str, Any]:
     """Create a new interview session."""
     plan_mode = "fixed"
@@ -75,6 +78,13 @@ async def create_session(
         "session_id": session_id,
         "project_id": project_id,
         "status": "active",
+        "stage": "need_question",
+        "pending": None,
+        "cycle": None,
+        "teach": teach,
+        "teach_below": teach_below,
+        "max_lessons": max_lessons,
+        "lessons_given": 0,
         "plan_mode": plan_mode,
         "plan": plan,
         "current": 0,

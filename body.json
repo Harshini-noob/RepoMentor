@@ -1,1 +1,5 @@
-{"message":"What API endpoints does this project expose?"}
+
+{
+  "session_id": "66d46822-2fb7-4f6c-90fb-a7ed5917c12c",
+  "message": "How does it handle unhandled errors or invalid inputs?"
+}

@@ -229,3 +229,79 @@ class InterviewReportResponse(BaseModel):
     before_after: list[dict[str, Any]] = Field(default_factory=list)
     average_improvement: float | None = None
 
+
+class InterviewSessionCreateRequest(BaseModel):
+    questions: int = Field(default=5, ge=1, le=8)
+    difficulty: int = Field(default=2, ge=1, le=5)
+    adaptive: bool = True
+    teach: bool = True
+    teach_below: int = 2
+    max_lessons: int = 2
+
+
+class InterviewSessionCreateResponse(BaseModel):
+    session_id: str
+    plan: list[dict[str, Any]] = Field(default_factory=list)
+    status: str
+
+
+class InterviewAnswerRequest(BaseModel):
+    question_id: str
+    answer: str = Field(..., min_length=1, max_length=3000)
+
+
+class InterviewPendingState(BaseModel):
+    kind: str
+    question_id: str
+    text: str = ""
+
+
+class InterviewStateResponse(BaseModel):
+    session_id: str
+    stage: str
+    pending: InterviewPendingState | None = None
+    cycle: dict[str, Any] | None = None
+    slot: int
+    total: int
+    status: str
+    lessons_given: int = 0
+    max_lessons: int = 2
+
+
+class InterviewActionResponse(BaseModel):
+    action: str
+    kind: str | None = None
+    question_id: str | None = None
+    text: str | None = None
+    slot: int | None = None
+    total: int | None = None
+    round: str | None = None
+    difficulty: int | None = None
+    concept: str | None = None
+    reason: str | None = None
+    notes: list[str] | None = None
+    summary: dict[str, Any] | None = None
+
+
+class InterviewEvaluationResponse(BaseModel):
+    score: int | None = None
+    coverage: float | None = None
+    points: list[dict[str, Any]] = Field(default_factory=list)
+    misconceptions: list[dict[str, Any]] = Field(default_factory=list)
+    unverified: list[dict[str, Any]] = Field(default_factory=list)
+    strengths: list[str] = Field(default_factory=list)
+    advice: str = ""
+    notes: list[str] = Field(default_factory=list)
+    role: str = ""
+    next: str = ""
+    copied: bool | None = None
+    before: int | None = None
+    after: int | None = None
+
+
+class InterviewSkipResponse(BaseModel):
+    action: str = "skipped"
+    status: str = "skipped"
+    stage: str
+
+
