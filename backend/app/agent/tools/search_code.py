@@ -30,6 +30,15 @@ def matches_glob(path: str, pattern: str | None) -> bool:
     )
 
 
+GENERIC_QUERIES = {"def", "class", "import", "return", "self"}
+
+
+def is_generic_query(query: str) -> bool:
+    """Check if query is shorter than 4 characters or equal to one of def, class, import, return, self."""
+    q = query.strip()
+    return len(q) < 4 or q.lower() in GENERIC_QUERIES
+
+
 class SearchCodeArgs(BaseModel):
     query: str
     path_glob: str | None = None
@@ -56,6 +65,15 @@ class SearchCodeTool(Tool):
         raw_query = args.query.strip()
         if not raw_query:
             return ToolOutput(text="ERROR: Search query cannot be empty.", evidence_ids=[])
+
+        if is_generic_query(raw_query):
+            return ToolOutput(
+                text=(
+                    f"ERROR: query '{raw_query}' is too generic. "
+                    "Search for a specific name or phrase, or use get_dossier or get_facts."
+                ),
+                evidence_ids=[],
+            )
 
         all_files: list[dict[str, Any]] = []
         cursor = db.files.find(

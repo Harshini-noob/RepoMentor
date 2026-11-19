@@ -27,6 +27,7 @@ from app.agent.state import AgentRun, LLMReply, ToolCall, TraceStep
 from app.agent.tools import build_registry
 from app.agent.tools.base import ToolOutput
 from app.agent.tools.registry import ToolRegistry
+from app.agent.tools.search_code import is_generic_query
 from app.core.db import get_db
 from app.core.logging import redact
 
@@ -399,10 +400,15 @@ async def run_agent(
                 tool_output: ToolOutput
                 call_key = repeated_guard._call_key(tc.name, args)
                 was_repeated = repeated_guard.is_repeated(tc.name, args)
-                if tc.name == "search_code":
+                is_generic = (
+                    tc.name == "search_code"
+                    and isinstance(args, dict)
+                    and is_generic_query(str(args.get("query", "")))
+                )
+                if tc.name == "search_code" and not is_generic:
                     search_code_call_count += 1
 
-                if tc.name == "search_code" and search_code_call_count > 4:
+                if tc.name == "search_code" and not is_generic and search_code_call_count > 4:
                     tool_output = ToolOutput(
                         text=(
                             "ERROR: search budget used (4). Use read_file, get_facts, "

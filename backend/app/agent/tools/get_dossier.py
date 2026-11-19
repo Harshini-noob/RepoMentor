@@ -47,7 +47,7 @@ class DossierTool(Tool):
     name = "get_dossier"
     description = (
         "Saved project understanding with tagged, cited claims. Use first. "
-        "query='supabase' searches all sections; section='decisions' lists one section."
+        "section='apis' lists one section; query='escal' searches all sections."
     )
     args_schema = DossierArgs
 
@@ -56,6 +56,30 @@ class DossierTool(Tool):
 
     def _get_db(self) -> AsyncIOMotorDatabase:
         return self._db if self._db is not None else get_db()
+
+    @staticmethod
+    def _format_section_claims(claims: list[dict]) -> tuple[list[str], list[str]]:
+        lines: list[str] = []
+        evidence_ids: list[str] = []
+        tag_labels = {"fact": "Fact", "inferred": "Inferred", "uncertain": "Uncertain"}
+        for claim in claims[:15]:
+            tag = tag_labels.get(str(claim.get("tag", "")).lower(), "Uncertain")
+            text = f"[{tag}] {claim.get('claim', '')}"
+            ids = [
+                evidence_id
+                for evidence_id in claim.get("evidence", [])
+                if isinstance(evidence_id, str) and not any(c.isspace() for c in evidence_id)
+            ][:3]
+            if ids:
+                text += f" [{', '.join(ids)}]"
+                evidence_ids.extend(ids)
+            commit = (claim.get("details") or {}).get("commit")
+            if commit:
+                text += f" (commit {str(commit)[:7]})"
+            if claim.get("source") == "user":
+                text += " (verified by the project owner)"
+            lines.append(text)
+        return lines, evidence_ids
 
     async def run(self, project_id: str, args: DossierArgs) -> ToolOutput:
         dossier = await self._get_db().dossiers.find_one(
@@ -69,6 +93,9 @@ class DossierTool(Tool):
         # 1. Search when query is given
         if args.query is not None:
             query_words = list(dict.fromkeys(w.lower() for w in re.findall(r"[a-zA-Z]{3,}", args.query)))
+            stems = list(dict.fromkeys(w[:5] if len(w) >= 6 else w for w in query_words))
+            stem_patterns = [re.compile(rf"\b{re.escape(stem)}") for stem in stems]
+
             sections_to_search = (
                 [args.section] if args.section and args.section in sections
                 else list(sections.keys())
@@ -85,16 +112,25 @@ class DossierTool(Tool):
                     evidence_blob = " ".join(evidence_list).lower()
 
                     score = 0.0
-                    for word in query_words:
-                        if word in claim_text:
+                    for pattern in stem_patterns:
+                        if pattern.search(claim_text):
                             score += 1.0
-                        if word in evidence_blob:
+                        if pattern.search(evidence_blob):
                             score += 0.5
 
                     if score > 0:
                         scored_claims.append((sec_name, claim, score))
 
             if not scored_claims:
+                if args.section is not None:
+                    claims = sections.get(args.section, [])
+                    claim_lines, evidence_ids = self._format_section_claims(claims)
+                    lines = [f"No claim in '{args.section}' matches '{args.query}'; showing the whole section."]
+                    lines.extend(claim_lines)
+                    return ToolOutput(
+                        text="\n".join(lines),
+                        evidence_ids=list(dict.fromkeys(evidence_ids)),
+                    )
                 return ToolOutput(
                     text=f"No dossier claims match '{args.query}'. Call get_dossier() to see the sections, or use search_code."
                 )
@@ -150,26 +186,7 @@ class DossierTool(Tool):
 
         # 3. Existing behaviour: no query, section given -> section claims
         claims = sections.get(args.section, [])
-        lines = []
-        evidence_ids = []
-        tag_labels = {"fact": "Fact", "inferred": "Inferred", "uncertain": "Uncertain"}
-        for claim in claims[:15]:
-            tag = tag_labels.get(claim.get("tag"), "Uncertain")
-            text = f"[{tag}] {claim.get('claim', '')}"
-            ids = [
-                evidence_id
-                for evidence_id in claim.get("evidence", [])
-                if isinstance(evidence_id, str) and not any(c.isspace() for c in evidence_id)
-            ][:3]
-            if ids:
-                text += f" [{', '.join(ids)}]"
-                evidence_ids.extend(ids)
-            commit = (claim.get("details") or {}).get("commit")
-            if commit:
-                text += f" (commit {str(commit)[:7]})"
-            if claim.get("source") == "user":
-                text += " (verified by the project owner)"
-            lines.append(text)
+        lines, evidence_ids = self._format_section_claims(claims)
         return ToolOutput(
             text="\n".join(lines) or "No claims saved for this section.",
             evidence_ids=list(dict.fromkeys(evidence_ids)),

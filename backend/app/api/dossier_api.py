@@ -26,8 +26,11 @@ async def _get_project_or_404(project_id: str, db: Any) -> dict[str, Any]:
     res = db.projects.find_one(query)
     project = await res if inspect.isawaitable(res) else res
     if not project:
-        res2 = db.projects.find_one({"id": project_id})
+        res2 = db.projects.find_one({"project_id": project_id})
         project = await res2 if inspect.isawaitable(res2) else res2
+    if not project:
+        res3 = db.projects.find_one({"id": project_id})
+        project = await res3 if inspect.isawaitable(res3) else res3
     if not project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

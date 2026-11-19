@@ -7,19 +7,14 @@ from app.agent.tools.registry import ToolRegistry
 from app.mentor.sessions import append_turn, get_session, recent_history
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "agent" / "prompts"
-INVESTIGATOR_PROMPT_FILE = PROMPTS_DIR / "investigator.md"
 MENTOR_PROMPT_FILE = PROMPTS_DIR / "mentor.md"
 
 
 def build_mentor_prompt() -> str:
-    """Build mentor system prompt: investigator.md followed by a blank line and mentor.md."""
-    investigator_text = ""
-    if INVESTIGATOR_PROMPT_FILE.exists():
-        investigator_text = INVESTIGATOR_PROMPT_FILE.read_text(encoding="utf-8").strip()
-    mentor_text = ""
+    """Build mentor system prompt: mentor.md contents ONLY."""
     if MENTOR_PROMPT_FILE.exists():
-        mentor_text = MENTOR_PROMPT_FILE.read_text(encoding="utf-8").strip()
-    return f"{investigator_text}\n\n{mentor_text}"
+        return MENTOR_PROMPT_FILE.read_text(encoding="utf-8").strip()
+    return ""
 
 
 async def ask(
@@ -36,7 +31,7 @@ async def ask(
     """Execute a mentor turn within a session.
 
     Builds the mentor system prompt, loads recent history from the session,
-    calls run_agent with max_steps=8, and saves the turn with append_turn
+    calls run_agent with max_steps=6, and saves the turn with append_turn
     only when stop_reason == 'answered'.
     """
     system_prompt = build_mentor_prompt()
@@ -46,7 +41,7 @@ async def ask(
     run_result = await run_agent(
         goal=message,
         project_id=project_id,
-        max_steps=8,
+        max_steps=6,
         db=db,
         registry=registry,
         chat_fn=chat_fn,

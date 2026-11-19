@@ -77,6 +77,30 @@ def test_recent_history_retention_and_trimming() -> None:
     assert recent_history({}, n_exchanges=0) == []
 
 
+def test_recent_history_defaults() -> None:
+    long_answer = "C" * 1500
+    session = {
+        "messages": [
+            {"role": "user", "content": "u1", "ts": "t1", "meta": {}},
+            {"role": "assistant", "content": "a1", "ts": "t2", "meta": {}},
+            {"role": "user", "content": "u2", "ts": "t3", "meta": {}},
+            {"role": "assistant", "content": "a2", "ts": "t4", "meta": {}},
+            {"role": "user", "content": "u3", "ts": "t5", "meta": {}},
+            {"role": "assistant", "content": long_answer, "ts": "t6", "meta": {}},
+            {"role": "user", "content": "u4", "ts": "t7", "meta": {}},
+            {"role": "assistant", "content": "a4", "ts": "t8", "meta": {}},
+        ]
+    }
+    history = recent_history(session)
+    # Default n_exchanges=2 -> 4 messages: u3, a3, u4, a4
+    assert len(history) == 4
+    assert history[0] == {"role": "user", "content": "u3"}
+    # Default max_chars=900 -> 900 chars + "..."
+    assert history[1] == {"role": "assistant", "content": ("C" * 900) + "..."}
+    assert history[2] == {"role": "user", "content": "u4"}
+    assert history[3] == {"role": "assistant", "content": "a4"}
+
+
 @pytest.mark.asyncio
 async def test_ask_saves_turn_and_sends_history() -> None:
     client = AsyncMongoMockClient()
@@ -127,6 +151,9 @@ async def test_ask_saves_turn_and_sends_history() -> None:
 
     second_call_messages = recorded_calls[1]["messages"]
     assert second_call_messages[0]["role"] == "system"
+    assert second_call_messages[0]["content"] == build_mentor_prompt()
+    assert "investigator" not in second_call_messages[0]["content"].lower()
+    assert "You investigate one GitHub repository" not in second_call_messages[0]["content"]
     assert "RepoMentor" in second_call_messages[0]["content"]
     assert second_call_messages[1] == {"role": "user", "content": "First question?"}
     assert second_call_messages[2] == {
@@ -320,6 +347,20 @@ async def test_get_dossier_query_ordering_and_no_match() -> None:
                     "evidence": ["file:tests/test_all.py#L1"],
                 }
             ],
+            "features": [
+                {
+                    "claim": "The router escalates unhandled failures",
+                    "tag": "fact",
+                    "evidence": ["file:src/router.py#L50"],
+                }
+            ],
+            "apis": [
+                {
+                    "claim": "Webhook dispatcher sends events",
+                    "tag": "fact",
+                    "evidence": ["file:src/webhook.py#L1-10"],
+                }
+            ],
         },
     })
 
@@ -355,6 +396,18 @@ async def test_get_dossier_query_ordering_and_no_match() -> None:
         "No dossier claims match 'nonexistent_keyword'. "
         "Call get_dossier() to see the sections, or use search_code."
     )
+
+    # Stem matching: query="escalation" matches claim containing "escalates"
+    out_stem = await tool.run(project_id, DossierArgs(query="escalation"))
+    assert "1 claims match 'escalation' across all sections" in out_stem.text
+    assert "The router escalates unhandled failures" in out_stem.text
+
+    # Fallback when section + query match nothing in that section
+    out_fallback = await tool.run(project_id, DossierArgs(section="apis", query="API endpoint"))
+    fallback_lines = out_fallback.text.splitlines()
+    assert fallback_lines[0] == "No claim in 'apis' matches 'API endpoint'; showing the whole section."
+    assert "[Fact] Webhook dispatcher sends events [file:src/webhook.py#L1-10]" in out_fallback.text
+    assert "file:src/webhook.py#L1-10" in out_fallback.evidence_ids
 
 
 @pytest.mark.asyncio

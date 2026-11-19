@@ -555,6 +555,22 @@ async def test_search_code_falls_back_to_individual_words(
 
 
 @pytest.mark.asyncio
+async def test_search_code_generic_query_returns_error(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    seeded_project = await seed_project_data(mock_db)
+    tool = SearchCodeTool(db=mock_db)
+
+    for generic in ["def", "class", "import", "return", "self", "abc", "x"]:
+        out = await tool.run(seeded_project, tool.args_schema(query=generic))
+        assert out.text == (
+            f"ERROR: query '{generic}' is too generic. "
+            "Search for a specific name or phrase, or use get_dossier or get_facts."
+        )
+        assert out.evidence_ids == []
+
+
+@pytest.mark.asyncio
 async def test_get_dependencies_tool(mock_db: AsyncIOMotorDatabase) -> None:
     seeded_project = await seed_project_data(mock_db)
     tool = DependenciesTool(db=mock_db)

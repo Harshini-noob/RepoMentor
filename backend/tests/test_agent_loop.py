@@ -1191,6 +1191,92 @@ async def test_fifth_search_code_call_returns_budget_error(
 
 
 @pytest.mark.asyncio
+async def test_search_code_generic_query_does_not_use_budget(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    executed_queries: list[str] = []
+    seen_generic_error = False
+    seen_budget_error = False
+
+    class StubRegistry:
+        def schemas(self):
+            return []
+
+        async def execute(self, name, args, project_id):
+            executed_queries.append(args["query"])
+            if args["query"] == "def":
+                return ToolOutput(
+                    text="ERROR: query 'def' is too generic. Search for a specific name or phrase, or use get_dossier or get_facts."
+                )
+            return ToolOutput(text=f"found {args['query']}")
+
+    call_number = 0
+
+    async def fake_chat(messages, tools=None):
+        nonlocal call_number, seen_generic_error, seen_budget_error
+        for message in messages:
+            if message.get("role") == "tool":
+                content = message.get("content", "")
+                if "is too generic" in content:
+                    seen_generic_error = True
+                if content.startswith("ERROR: search budget used (4)."):
+                    seen_budget_error = True
+
+        call_number += 1
+        # Call 1: generic search_code("def")
+        if call_number == 1:
+            return LLMReply(
+                content="Generic search.",
+                tool_calls=[
+                    ToolCall(
+                        id=f"search-{call_number}",
+                        name="search_code",
+                        arguments={"query": "def"},
+                    )
+                ],
+            )
+        # Calls 2-5: 4 non-generic searches (consume budget)
+        if 2 <= call_number <= 5:
+            return LLMReply(
+                content="Legitimate search.",
+                tool_calls=[
+                    ToolCall(
+                        id=f"search-{call_number}",
+                        name="search_code",
+                        arguments={"query": f"legit-{call_number}"},
+                    )
+                ],
+            )
+        # Call 6: 5th non-generic search (should hit budget limit)
+        if call_number == 6:
+            return LLMReply(
+                content="5th legitimate search.",
+                tool_calls=[
+                    ToolCall(
+                        id=f"search-{call_number}",
+                        name="search_code",
+                        arguments={"query": "overflow-query"},
+                    )
+                ],
+            )
+        return LLMReply(content="[Uncertain] Done.", tool_calls=[])
+
+    await run_agent(
+        goal="Search code budget test.",
+        project_id="proj_generic_search_budget",
+        max_steps=8,
+        db=mock_db,
+        registry=StubRegistry(),
+        chat_fn=fake_chat,
+    )
+
+    # "def" plus 4 legitimate searches were executed; the 5th legitimate search was stopped by budget error
+    assert executed_queries == ["def", "legit-2", "legit-3", "legit-4", "legit-5"]
+    assert seen_generic_error
+    assert seen_budget_error
+
+
+@pytest.mark.asyncio
 async def test_unverified_fenced_block_is_removed_after_failed_repair(
     mock_db: AsyncIOMotorDatabase,
 ) -> None:

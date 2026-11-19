@@ -57,8 +57,8 @@ async def append_turn(
 
 def recent_history(
     session: dict[str, Any] | None,
-    n_exchanges: int = 3,
-    max_chars: int = 1200,
+    n_exchanges: int = 2,
+    max_chars: int = 900,
 ) -> list[dict[str, str]]:
     """Return the last n exchanges as role/content dicts.
 

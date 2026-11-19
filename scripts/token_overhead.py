@@ -9,6 +9,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 from app.agent.loop import load_system_prompt
 from app.agent.tools import build_registry
+from app.mentor.chat import build_mentor_prompt
 
 
 def main() -> None:
@@ -18,8 +19,16 @@ def main() -> None:
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    print(f"System prompt: {len(system_prompt) / 4:.2f} estimated tokens")
-    print(f"Tool schemas: {len(schemas_json) / 4:.2f} estimated tokens")
+    prompt_tokens = len(system_prompt) / 4
+    tool_tokens = len(schemas_json) / 4
+    mentor_prompt = build_mentor_prompt()
+    mentor_tokens = len(mentor_prompt) / 4
+    total_mentor_overhead = mentor_tokens + tool_tokens
+
+    print(f"System prompt: {prompt_tokens:.2f} estimated tokens")
+    print(f"Tool schemas: {tool_tokens:.2f} estimated tokens")
+    print(f"Mentor prompt (mentor.md): {mentor_tokens:.2f} estimated tokens")
+    print(f"Total mentor-mode overhead: {total_mentor_overhead:.2f} estimated tokens")
 
 
 if __name__ == "__main__":
