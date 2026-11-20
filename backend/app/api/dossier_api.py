@@ -140,3 +140,47 @@ async def get_dossier_section(
         )
 
     return DossierSectionDetailResponse(name=name, claims=claim_items)
+
+
+@router.post(
+    "/dossier/static",
+)
+async def build_static_dossier_endpoint(
+    project_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> dict[str, Any]:
+    """Build static dossier with build_static_dossier and save with save_dossier keeping non-static claims."""
+    project = await _get_project_or_404(project_id, db)
+    if project.get("status") != "ready":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Project '{project_id}' is not ready (status: {project.get('status')})",
+        )
+
+    from app.dossier.builder import rebuild_static, save_dossier
+
+    dossier = await rebuild_static(db, project_id)
+    saved = await save_dossier(db, dossier)
+
+    sections_out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for name in SECTIONS:
+        seen.add(name)
+        claims = saved.sections.get(name) or []
+        sections_out.append({
+            "name": name,
+            "claims": [c.model_dump(mode="json") if hasattr(c, "model_dump") else c for c in claims],
+        })
+
+    for name, claims in saved.sections.items():
+        if name not in seen:
+            sections_out.append({
+                "name": name,
+                "claims": [c.model_dump(mode="json") if hasattr(c, "model_dump") else c for c in claims],
+            })
+
+    return {
+        "version": saved.version,
+        "sections": sections_out,
+    }
+

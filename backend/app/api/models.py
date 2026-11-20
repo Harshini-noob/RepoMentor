@@ -32,6 +32,13 @@ class ProjectDetailResponse(BaseModel):
     counts: ProjectCounts
 
 
+class ProjectSummaryCounts(BaseModel):
+    files: int = 0
+    commits: int = 0
+    dependencies: int = 0
+    facts: int = 0
+
+
 class ProjectSummary(BaseModel):
     id: str
     repo_full_name: str
@@ -41,6 +48,8 @@ class ProjectSummary(BaseModel):
     default_branch: str | None = None
     analysed_at: str | None = None
     error: str | None = None
+    dossier_version: int | None = None
+    counts: ProjectSummaryCounts = Field(default_factory=ProjectSummaryCounts)
 
 
 # ---------------------------------------------------------------------------

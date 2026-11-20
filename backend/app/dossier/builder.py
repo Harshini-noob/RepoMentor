@@ -52,9 +52,11 @@ def _group(facts: list[dict], kind: str) -> dict[str, list[dict]]:
 
 
 async def build_static_dossier(project_id: str, db) -> Dossier:
-    project = await db.projects.find_one(
-        {"$or": [{"project_id": project_id}, {"_id": project_id}]}
-    )
+    from bson import ObjectId
+    q_proj: list[dict[str, Any]] = [{"project_id": project_id}, {"_id": project_id}]
+    if ObjectId.is_valid(project_id):
+        q_proj.append({"_id": ObjectId(project_id)})
+    project = await db.projects.find_one({"$or": q_proj})
     project = project or {}
     repo = project.get("repo_full_name") or project_id
     repo_ev = [f"repo:{repo}"]

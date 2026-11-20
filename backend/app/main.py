@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.analysis import router as analysis_router
 from app.api.dossier_api import router as dossier_router
+from app.api.evidence_api import router as evidence_router
 from app.api.interview_api import router as interview_router
 from app.api.mentor_api import router as mentor_router
 from app.api.projects import router as projects_router
@@ -33,7 +34,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -42,6 +43,7 @@ app.include_router(analysis_router)
 app.include_router(mentor_router)
 app.include_router(dossier_router)
 app.include_router(interview_router)
+app.include_router(evidence_router)
 
 
 @app.get("/health")

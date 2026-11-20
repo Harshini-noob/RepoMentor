@@ -9,6 +9,7 @@ from app.api.models import (
     ProjectCreateResponse,
     ProjectDetailResponse,
     ProjectSummary,
+    ProjectSummaryCounts,
 )
 from app.core.db import get_db
 from app.core.repositories import upsert_project
@@ -134,6 +135,20 @@ async def list_projects(
     projects: list[ProjectSummary] = []
     cursor = db.projects.find().sort("repo_full_name", 1)
     async for doc in cursor:
+        pid = str(doc.get("project_id") or doc["_id"])
+        pid_list = [pid, str(doc["_id"])]
+        if doc.get("project_id"):
+            pid_list.append(str(doc["project_id"]))
+        pid_query = {"$in": list(dict.fromkeys(pid_list))}
+
+        files_count = await db.files.count_documents({"project_id": pid_query})
+        commits_count = await db.commits.count_documents({"project_id": pid_query})
+        deps_count = await db.dependencies.count_documents({"project_id": pid_query})
+        facts_count = await db.derived_facts.count_documents({"project_id": pid_query})
+
+        dossier = await db.dossiers.find_one({"project_id": pid_query}, {"version": 1})
+        dossier_version = dossier.get("version") if dossier else None
+
         projects.append(
             ProjectSummary(
                 id=str(doc["_id"]),
@@ -144,6 +159,13 @@ async def list_projects(
                 default_branch=doc.get("default_branch"),
                 analysed_at=doc.get("analysed_at"),
                 error=doc.get("error"),
+                dossier_version=dossier_version,
+                counts=ProjectSummaryCounts(
+                    files=files_count,
+                    commits=commits_count,
+                    dependencies=deps_count,
+                    facts=facts_count,
+                ),
             )
         )
     return projects
