@@ -53,21 +53,26 @@ def _group(facts: list[dict], kind: str) -> dict[str, list[dict]]:
 
 async def build_static_dossier(project_id: str, db) -> Dossier:
     from bson import ObjectId
-    q_proj: list[dict[str, Any]] = [{"project_id": project_id}, {"_id": project_id}]
+    q_proj: list[dict[str, Any]] = [
+        {"project_id": project_id},
+        {"repo_full_name": project_id},
+        {"_id": project_id},
+    ]
     if ObjectId.is_valid(project_id):
         q_proj.append({"_id": ObjectId(project_id)})
     project = await db.projects.find_one({"$or": q_proj})
     project = project or {}
-    repo = project.get("repo_full_name") or project_id
+    canonical_pid = project.get("project_id") or str(project.get("_id") or project_id)
+    repo = project.get("repo_full_name") or canonical_pid
     repo_ev = [f"repo:{repo}"]
 
-    files = await db.files.find({"project_id": project_id}).to_list(length=None)
-    deps = await db.dependencies.find({"project_id": project_id}).to_list(length=None)
-    facts = await db.derived_facts.find({"project_id": project_id}).to_list(length=None)
-    commits = await db.commits.find({"project_id": project_id}).to_list(length=None)
+    files = await db.files.find({"project_id": canonical_pid}).to_list(length=None)
+    deps = await db.dependencies.find({"project_id": canonical_pid}).to_list(length=None)
+    facts = await db.derived_facts.find({"project_id": canonical_pid}).to_list(length=None)
+    commits = await db.commits.find({"project_id": canonical_pid}).to_list(length=None)
     code_facts = [f for f in facts if not f.get("in_test")]
 
-    dossier = Dossier(project_id=project_id, generated_from_sha=project.get("head_sha"))
+    dossier = Dossier(project_id=canonical_pid, generated_from_sha=project.get("head_sha"))
     s = dossier.sections
 
     # ---- identity
@@ -197,8 +202,8 @@ async def build_static_dossier(project_id: str, db) -> Dossier:
         s["quality"].append(
             _fact("No test files were detected by file-name patterns (test_*.py, *_test.py, *.test.js)", repo_ev)
         )
-    n_prs = await db.prs.count_documents({"project_id": project_id})
-    n_issues = await db.issues.count_documents({"project_id": project_id})
+    n_prs = await db.prs.count_documents({"project_id": canonical_pid})
+    n_issues = await db.issues.count_documents({"project_id": canonical_pid})
     s["quality"].append(
         _fact(f"{n_prs} pull requests and {n_issues} issues were found when the repository was ingested", repo_ev)
     )
@@ -228,7 +233,7 @@ async def save_dossier(db, dossier: Dossier) -> Dossier:
 async def rebuild_static(db, project_id: str) -> Dossier:
     """Rebuild the static claims but keep claims written by the agent or the user."""
     new = await build_static_dossier(project_id, db)
-    old = await db.dossiers.find_one({"project_id": project_id}, {"_id": 0})
+    old = await db.dossiers.find_one({"project_id": {"$in": [new.project_id, project_id]}}, {"_id": 0})
     if old:
         for name, claims in (old.get("sections") or {}).items():
             kept = [Claim.model_validate(c) for c in claims if c.get("source") != "static"]

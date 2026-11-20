@@ -20,6 +20,7 @@ class ProjectCounts(BaseModel):
 
 class ProjectDetailResponse(BaseModel):
     id: str
+    project_id: str
     repo_full_name: str
     default_branch: str | None = None
     status: str
@@ -41,6 +42,7 @@ class ProjectSummaryCounts(BaseModel):
 
 class ProjectSummary(BaseModel):
     id: str
+    project_id: str
     repo_full_name: str
     status: str
     facts_status: str | None = None
@@ -154,6 +156,7 @@ class DossierSectionSummary(BaseModel):
     inferred: int
     uncertain: int
     user_edited: int
+    agent: int = 0
 
 
 class DossierSummaryResponse(BaseModel):

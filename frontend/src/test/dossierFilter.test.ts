@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { countClaimsByTag, filterClaims } from "../lib/evidence";
+import { formatSectionName } from "../pages/DossierPage";
 import type { DossierClaim, ClaimTag } from "../types";
 
 describe("dossier claim helpers", () => {
@@ -37,6 +38,16 @@ describe("dossier claim helpers", () => {
       source: "static",
     },
   ];
+
+  describe("formatSectionName", () => {
+    it("capitalizes APIs and Interview map properly", () => {
+      expect(formatSectionName("apis")).toBe("APIs");
+      expect(formatSectionName("interview_map")).toBe("Interview map");
+      expect(formatSectionName("technologies")).toBe("Technologies");
+      expect(formatSectionName("identity")).toBe("Identity");
+      expect(formatSectionName("data")).toBe("Data");
+    });
+  });
 
   describe("countClaimsByTag", () => {
     it("correctly counts claims by their tag", () => {

@@ -11,6 +11,7 @@ from app.api.models import (
     ProjectSummary,
     ProjectSummaryCounts,
 )
+from app.api.resolve import resolve_project
 from app.core.db import get_db
 from app.core.repositories import upsert_project
 from app.ingestion.pipeline import ingest_project
@@ -81,7 +82,7 @@ async def create_project(
             },
         )
 
-    project_id = str(project["_id"])
+    project_id = str(project.get("project_id") or project["_id"])
 
     # Trigger background ingestion if not currently in progress
     if project.get("status") != "ingesting":
@@ -95,21 +96,18 @@ async def get_project(
     id: str,
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> ProjectDetailResponse:
-    # Support both Mongo ObjectId and raw string IDs
-    query = {"_id": ObjectId(id)} if ObjectId.is_valid(id) else {"_id": id}
-    project = await db.projects.find_one(query)
+    project = await resolve_project(db, id)
+    canonical_id = project["project_id"]
 
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project with ID '{id}' not found")
-
-    # Aggregate counts across related collections
-    files_count = await db.files.count_documents({"project_id": id})
-    commits_count = await db.commits.count_documents({"project_id": id})
-    prs_count = await db.prs.count_documents({"project_id": id})
-    issues_count = await db.issues.count_documents({"project_id": id})
+    # Aggregate counts across related collections using canonical_id
+    files_count = await db.files.count_documents({"project_id": canonical_id})
+    commits_count = await db.commits.count_documents({"project_id": canonical_id})
+    prs_count = await db.prs.count_documents({"project_id": canonical_id})
+    issues_count = await db.issues.count_documents({"project_id": canonical_id})
 
     return ProjectDetailResponse(
         id=str(project["_id"]),
+        project_id=canonical_id,
         repo_full_name=project["repo_full_name"],
         default_branch=project.get("default_branch"),
         status=project.get("status", "unknown"),
@@ -135,10 +133,8 @@ async def list_projects(
     projects: list[ProjectSummary] = []
     cursor = db.projects.find().sort("repo_full_name", 1)
     async for doc in cursor:
-        pid = str(doc.get("project_id") or doc["_id"])
-        pid_list = [pid, str(doc["_id"])]
-        if doc.get("project_id"):
-            pid_list.append(str(doc["project_id"]))
+        canonical_pid = str(doc.get("project_id") or doc["_id"])
+        pid_list = [canonical_pid, str(doc["_id"])]
         pid_query = {"$in": list(dict.fromkeys(pid_list))}
 
         files_count = await db.files.count_documents({"project_id": pid_query})
@@ -152,6 +148,7 @@ async def list_projects(
         projects.append(
             ProjectSummary(
                 id=str(doc["_id"]),
+                project_id=canonical_pid,
                 repo_full_name=doc["repo_full_name"],
                 status=doc.get("status", "unknown"),
                 facts_status=doc.get("facts_status"),

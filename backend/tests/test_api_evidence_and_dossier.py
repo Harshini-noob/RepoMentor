@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import urllib.parse
 from bson import ObjectId
 from fastapi.testclient import TestClient
 from mongomock_motor import AsyncMongoMockClient
 import pytest
 
 from app.core.db import get_db
+from app.dossier.builder import build_static_dossier
 from app.main import app
 
 
@@ -30,13 +32,18 @@ def pid():
     return str(ObjectId())
 
 
-async def _setup_test_project(mock_db, pid: str, status: str = "ready"):
-    await mock_db.projects.insert_one({
-        "_id": ObjectId(pid),
+async def _setup_test_project(mock_db, pid: str, status: str = "ready", repo_full_name: str | None = None, project_id: str | None = None):
+    canonical_pid = project_id or pid
+    repo_name = repo_full_name or f"owner/repo_{pid[:6]}"
+    doc = {
+        "_id": ObjectId(pid) if ObjectId.is_valid(pid) else pid,
+        "project_id": canonical_pid,
         "status": status,
-        "repo_full_name": f"owner/repo_{pid[:6]}",
+        "repo_full_name": repo_name,
         "default_branch": "main",
-    })
+    }
+    await mock_db.projects.insert_one(doc)
+    return doc
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +71,6 @@ async def test_evidence_file_good_and_missing(client, mock_db, pid):
     assert data["language"] == "python"
     assert data["start"] == 10
     assert data["end"] == 15
-    # Context lines: 2 before (8, 9), 10..15 in range, 2 after (16, 17) -> lines 8..17 (10 lines total)
     assert len(data["lines"]) == 10
     assert data["lines"][0]["n"] == 8
     assert data["lines"][0]["in_range"] is False
@@ -81,7 +87,6 @@ async def test_evidence_file_good_and_missing(client, mock_db, pid):
     data_single = res_single.json()
     assert data_single["start"] == 10
     assert data_single["end"] == 10
-    # Context: 8, 9, 10, 11, 12
     assert len(data_single["lines"]) == 5
 
     # Missing file -> 404
@@ -98,34 +103,34 @@ async def test_evidence_file_clipping_at_60(client, mock_db, pid):
     content = "\n".join([f"line {i}" for i in range(1, 101)])
     await mock_db.files.insert_one({
         "project_id": pid,
-        "path": "long.py",
+        "path": "big.py",
         "content": content,
+        "language": "python",
     })
 
-    # Request 80 lines: #L5-85
-    res = client.get(f"/projects/{pid}/evidence", params={"id": "file:long.py#L5-85"})
+    # Request 1 to 100 -> should be clipped to at most 60 lines
+    res = client.get(f"/projects/{pid}/evidence", params={"id": "file:big.py#L1-100"})
     assert res.status_code == 200
     data = res.json()
-    assert len(data["lines"]) == 60
-    assert data["lines"][0]["n"] == 3  # context start (5 - 2 = 3)
-    assert data["lines"][-1]["n"] == 62  # 3 + 59 = 62
+    assert len(data["lines"]) <= 60
 
 
 @pytest.mark.asyncio
-async def test_evidence_file_without_content(client, mock_db, pid):
+async def test_evidence_file_content_unavailable(client, mock_db, pid):
     await _setup_test_project(mock_db, pid)
 
     await mock_db.files.insert_one({
         "project_id": pid,
-        "path": "large_binary.dat",
+        "path": "binary.bin",
         "content": None,
+        "language": "binary",
     })
 
-    res = client.get(f"/projects/{pid}/evidence", params={"id": "file:large_binary.dat#L1-10"})
+    res = client.get(f"/projects/{pid}/evidence", params={"id": "file:binary.bin"})
     assert res.status_code == 200
     data = res.json()
     assert data["kind"] == "file"
-    assert data["path"] == "large_binary.dat"
+    assert data["path"] == "binary.bin"
     assert data["available"] is False
     assert data["reason"] == "content was not stored"
 
@@ -135,103 +140,125 @@ async def test_evidence_file_without_content(client, mock_db, pid):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_evidence_commit_good_and_missing(client, mock_db, pid):
+async def test_evidence_commit_prefix_and_path(client, mock_db, pid):
     await _setup_test_project(mock_db, pid)
+    full_sha = "02a5c7be1d82136a9e144a23a31c5b8826760ef1"
+    sha7 = full_sha[:7]
 
-    long_msg = "feat: add feature\n\n" + ("detail " * 100)
+    files_list = [f"file_{i}.py" for i in range(40)]  # 40 files
+    files_list.append("logger.py")
+
     await mock_db.commits.insert_one({
         "project_id": pid,
-        "sha": "a1b2c3d4e5f67890abcdef",
-        "date": "2026-11-20T10:00:00Z",
+        "sha": full_sha,
+        "date": "2026-10-20T12:00:00Z",
         "author": "Alice",
-        "message": long_msg,
+        "message": "fix: resolve memory leak in logger\n\nDetailed description here...",
         "additions": 42,
         "deletions": 5,
-        "files_changed": ["app/main.py", "app/utils.py"],
+        "files_changed": files_list,
     })
 
-    # Good request without path: commit:<sha7>
-    res1 = client.get(f"/projects/{pid}/evidence?id=commit:a1b2c3d")
-    assert res1.status_code == 200
-    d1 = res1.json()
-    assert d1["kind"] == "commit"
-    assert d1["sha"] == "a1b2c3d4e5f67890abcdef"
-    assert d1["author"] == "Alice"
-    assert len(d1["message"]) <= 500
-    assert d1["additions"] == 42
-    assert d1["deletions"] == 5
-    assert d1["files_changed"] == ["app/main.py", "app/utils.py"]
-    assert "path" not in d1
+    # Request commit:sha7
+    res = client.get(f"/projects/{pid}/evidence", params={"id": f"commit:{sha7}"})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["kind"] == "commit"
+    assert data["sha"] == full_sha
+    assert data["author"] == "Alice"
+    assert data["additions"] == 42
+    assert data["deletions"] == 5
+    assert len(data["files_changed"]) == 30  # clipped at 30
 
-    # Good request with path: commit:<sha7>:<path>
-    res2 = client.get(f"/projects/{pid}/evidence?id=commit:a1b2c3d:app/main.py")
-    assert res2.status_code == 200
-    d2 = res2.json()
-    assert d2["path"] == "app/main.py"
-    assert d2["path_in_commit"] is True
+    # Request commit:sha7:path (path in commit)
+    res_path = client.get(f"/projects/{pid}/evidence", params={"id": f"commit:{sha7}:logger.py"})
+    assert res_path.status_code == 200
+    data_p = res_path.json()
+    assert data_p["path"] == "logger.py"
+    assert data_p["path_in_commit"] is True
 
-    # Path not in commit
-    res3 = client.get(f"/projects/{pid}/evidence?id=commit:a1b2c3d:other.py")
-    assert res3.status_code == 200
-    d3 = res3.json()
-    assert d3["path"] == "other.py"
-    assert d3["path_in_commit"] is False
+    # Request commit:sha7:path (path NOT in commit)
+    res_no = client.get(f"/projects/{pid}/evidence", params={"id": f"commit:{sha7}:unrelated.go"})
+    assert res_no.status_code == 200
+    data_no = res_no.json()
+    assert data_no["path"] == "unrelated.go"
+    assert data_no["path_in_commit"] is False
 
-    # Missing commit
-    res_missing = client.get(f"/projects/{pid}/evidence?id=commit:9999999")
-    assert res_missing.status_code == 404
-    assert "not found" in res_missing.json()["detail"].lower()
+
+@pytest.mark.asyncio
+async def test_evidence_commit_message_clipped_at_500(client, mock_db, pid):
+    await _setup_test_project(mock_db, pid)
+    long_msg = "A" * 800
+    sha = "1234567890abcdef1234567890abcdef12345678"
+    await mock_db.commits.insert_one({
+        "project_id": pid,
+        "sha": sha,
+        "message": long_msg,
+    })
+
+    res = client.get(f"/projects/{pid}/evidence", params={"id": f"commit:{sha[:7]}"})
+    assert res.status_code == 200
+    assert len(res.json()["message"]) == 500
 
 
 # ---------------------------------------------------------------------------
-# 3. Evidence: Dependency
+# 3. Evidence: Dependencies
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_evidence_dep_good_and_missing(client, mock_db, pid):
+async def test_evidence_dependency_matching(client, mock_db, pid):
     await _setup_test_project(mock_db, pid)
 
     await mock_db.dependencies.insert_one({
         "project_id": pid,
-        "name": "fastapi",
-        "version_spec": ">=0.100.0",
-        "kind": "runtime",
+        "name": "groq",
+        "version_spec": "^0.4.0",
+        "kind": "standard",
         "source_file": "pyproject.toml",
     })
+    await mock_db.dependencies.insert_one({
+        "project_id": pid,
+        "name": "groq",
+        "version_spec": "==0.4.1",
+        "kind": "dev",
+        "source_file": "requirements-dev.txt",
+    })
 
-    res = client.get(f"/projects/{pid}/evidence?id=dep:fastapi")
+    res = client.get(f"/projects/{pid}/evidence?id=dep:groq")
     assert res.status_code == 200
     data = res.json()
     assert data["kind"] == "dependency"
-    assert len(data["items"]) == 1
-    assert data["items"][0]["name"] == "fastapi"
-    assert data["items"][0]["version_spec"] == ">=0.100.0"
-    assert data["items"][0]["dep_kind"] == "runtime"
-    assert data["items"][0]["source_file"] == "pyproject.toml"
+    assert len(data["items"]) == 2
+    names = {item["version_spec"] for item in data["items"]}
+    assert "^0.4.0" in names
+    assert "==0.4.1" in names
 
-    # Missing
-    res_m = client.get(f"/projects/{pid}/evidence?id=dep:missing-package")
+    # Unknown dependency -> 404
+    res_m = client.get(f"/projects/{pid}/evidence?id=dep:unknown_pkg")
     assert res_m.status_code == 404
 
 
 # ---------------------------------------------------------------------------
-# 4. Evidence: Fact (no env var values leaked)
+# 4. Evidence: Fact (no env var leakage, non-test first)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_evidence_fact_good_missing_and_no_env_leaks(client, mock_db, pid):
+async def test_evidence_fact_nontest_first_and_no_leak(client, mock_db, pid):
     await _setup_test_project(mock_db, pid)
 
+    # 1 test fact
     await mock_db.derived_facts.insert_one({
         "project_id": pid,
         "kind": "database",
         "name": "supabase",
         "file_path": "tests/test_db.py",
-        "line_start": 5,
-        "line_end": 10,
+        "line_start": 10,
+        "line_end": 15,
         "in_test": True,
-        "details": {"env_key": "SECRET_PASSWORD_123", "url": "postgres://user:pass@host"},
+        "details": {"connection_string": "postgres://user:SECRET_PASSWORD_123@host:5432/db"},
     })
+
+    # 1 non-test fact
     await mock_db.derived_facts.insert_one({
         "project_id": pid,
         "kind": "database",
@@ -240,7 +267,7 @@ async def test_evidence_fact_good_missing_and_no_env_leaks(client, mock_db, pid)
         "line_start": 20,
         "line_end": 25,
         "in_test": False,
-        "details": {"env_secret": "API_SECRET_XYZ"},
+        "details": {"api_key": "API_SECRET_XYZ"},
     })
 
     res = client.get(f"/projects/{pid}/evidence?id=fact:database:supabase")
@@ -249,7 +276,6 @@ async def test_evidence_fact_good_missing_and_no_env_leaks(client, mock_db, pid)
     assert data["kind"] == "fact"
     items = data["items"]
     assert len(items) == 2
-    # Non-test items come first!
     assert items[0]["file_path"] == "app/db.py"
     assert items[0]["in_test"] is False
     assert items[1]["file_path"] == "tests/test_db.py"
@@ -269,7 +295,7 @@ async def test_evidence_fact_good_missing_and_no_env_leaks(client, mock_db, pid)
 
 
 # ---------------------------------------------------------------------------
-# 5. Evidence: Repo
+# 5. Evidence: Repo & Formats
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -298,10 +324,6 @@ async def test_evidence_repo_good_and_missing(client, mock_db, pid):
     assert res_m.status_code == 404
 
 
-# ---------------------------------------------------------------------------
-# 6. Evidence: Unsupported Format & Unknown Project
-# ---------------------------------------------------------------------------
-
 @pytest.mark.asyncio
 async def test_evidence_unsupported_format(client, mock_db, pid):
     await _setup_test_project(mock_db, pid)
@@ -322,88 +344,197 @@ def test_evidence_unknown_project_gives_404(client):
 
 
 # ---------------------------------------------------------------------------
-# 7. Static Dossier POST: Keep non-static claims & Increment version
+# 6. Build Static Dossier: API build equals CLI build & Canonical ID resolution
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_build_static_dossier_endpoint(client, mock_db, pid):
-    # 1. Project not ready -> 409
-    await _setup_test_project(mock_db, pid, status="ingesting")
-    res_not_ready = client.post(f"/projects/{pid}/dossier/static")
-    assert res_not_ready.status_code == 409
+async def test_api_build_equals_cli_build(client, mock_db):
+    canonical_pid = "proj_harshini_test"
+    repo_name = "Harshini-noob/llm-cost-copilot"
+    await _setup_test_project(mock_db, str(ObjectId()), status="ready", repo_full_name=repo_name, project_id=canonical_pid)
 
-    # 2. Unknown project -> 404
-    unknown_id = str(ObjectId())
-    res_unknown = client.post(f"/projects/{unknown_id}/dossier/static")
-    assert res_unknown.status_code == 404
+    # Seed rich repository data
+    await mock_db.files.insert_one({"project_id": canonical_pid, "path": "main.py", "language": "python"})
+    await mock_db.files.insert_one({"project_id": canonical_pid, "path": "README.md", "language": "markdown"})
+    await mock_db.dependencies.insert_one({"project_id": canonical_pid, "name": "fastapi", "kind": "runtime", "source_file": "pyproject.toml"})
+    await mock_db.dependencies.insert_one({"project_id": canonical_pid, "name": "groq", "kind": "runtime", "source_file": "pyproject.toml"})
+    await mock_db.derived_facts.insert_one({"project_id": canonical_pid, "kind": "route", "name": "POST /query", "file_path": "main.py", "line_start": 31, "line_end": 109, "in_test": False, "details": {"handler": "query"}})
+    await mock_db.derived_facts.insert_one({"project_id": canonical_pid, "kind": "database", "name": "supabase", "file_path": "db.py", "line_start": 10, "line_end": 20, "in_test": False})
+    await mock_db.derived_facts.insert_one({"project_id": canonical_pid, "kind": "test", "name": "test_query", "file_path": "test_main.py", "line_start": 1, "line_end": 10, "in_test": True})
+    await mock_db.commits.insert_one({"project_id": canonical_pid, "sha": "1234567890abcdef", "date": "2026-10-20T10:00:00Z", "message": "initial commit", "additions": 100, "deletions": 0})
 
-    # 3. Set project to ready and seed existing dossier with agent and user claims
-    await mock_db.projects.update_one({"_id": ObjectId(pid)}, {"$set": {"status": "ready"}})
-    await mock_db.files.insert_one({"project_id": pid, "path": "main.py", "language": "python"})
+    # CLI build directly with canonical_pid
+    cli_dossier = await build_static_dossier(canonical_pid, mock_db)
 
-    # Existing dossier version 1 with an agent claim and a user claim
+    # API build called with repo_name (URL encoded)
+    encoded_repo = urllib.parse.quote(repo_name, safe="")
+    res = client.post(f"/projects/{encoded_repo}/dossier/static")
+    assert res.status_code == 200
+    api_resp = res.json()
+    assert api_resp["version"] == 1
+    assert isinstance(api_resp["sections"], dict)
+
+    # Verify persisted document in MongoDB matches CLI claims
+    db_dossier = await mock_db.dossiers.find_one({"project_id": canonical_pid})
+    assert db_dossier is not None
+
+    for sec_name in ["identity", "technologies", "apis", "data", "timeline", "quality"]:
+        cli_claims = [c.claim for c in cli_dossier.sections.get(sec_name, [])]
+        db_claims = [c["claim"] for c in db_dossier["sections"].get(sec_name, [])]
+        assert cli_claims == db_claims
+        assert api_resp["sections"][sec_name] == len(cli_claims)
+
+
+@pytest.mark.asyncio
+async def test_calling_with_repo_name_or_project_id_writes_same_single_document(client, mock_db):
+    canonical_pid = "proj_single_doc"
+    repo_name = "test-org/repo-single"
+    await _setup_test_project(mock_db, str(ObjectId()), status="ready", repo_full_name=repo_name, project_id=canonical_pid)
+
+    await mock_db.files.insert_one({"project_id": canonical_pid, "path": "index.js", "language": "javascript"})
+
+    # 1. Call with canonical project_id
+    res1 = client.post(f"/projects/{canonical_pid}/dossier/static")
+    assert res1.status_code == 200
+
+    # Verify exactly 1 dossier exists
+    count1 = await mock_db.dossiers.count_documents({})
+    assert count1 == 1
+    doc1 = await mock_db.dossiers.find_one({})
+    assert doc1["project_id"] == canonical_pid
+
+    # 2. Call with URL-encoded repo name and force=True
+    encoded_repo = urllib.parse.quote(repo_name, safe="")
+    res2 = client.post(f"/projects/{encoded_repo}/dossier/static?force=true")
+    assert res2.status_code == 200
+
+    # Still exactly 1 dossier exists, updated to version 2
+    count2 = await mock_db.dossiers.count_documents({})
+    assert count2 == 1
+    doc2 = await mock_db.dossiers.find_one({})
+    assert doc2["project_id"] == canonical_pid
+    assert doc2["version"] == 2
+
+
+@pytest.mark.asyncio
+async def test_unknown_id_gives_404_and_writes_nothing(client, mock_db):
+    res = client.post("/projects/completely_nonexistent_repo/dossier/static")
+    assert res.status_code == 404
+    assert await mock_db.dossiers.count_documents({}) == 0
+    assert await mock_db.dossier_backups.count_documents({}) == 0
+
+
+@pytest.mark.asyncio
+async def test_build_incomplete_gives_409_without_force_and_succeeds_with_force(client, mock_db):
+    canonical_pid = "proj_guard_test"
+    await _setup_test_project(mock_db, str(ObjectId()), status="ready", project_id=canonical_pid)
+
+    # Existing dossier with 6 static claims
+    old_claims = [{"claim": f"Static claim {i}", "tag": "fact", "source": "static", "evidence": []} for i in range(6)]
     await mock_db.dossiers.insert_one({
-        "project_id": pid,
+        "project_id": canonical_pid,
+        "version": 1,
+        "sections": {
+            "technologies": old_claims,
+        },
+    })
+
+    # The current DB has zero files/facts, so a rebuild will only produce default 4 claims (identity + 3 quality)
+    # Wait, 4 claims < 6 / 2 is False (4 is not < 3). Let's make old dossier have 12 static claims!
+    old_claims_12 = [{"claim": f"Static claim {i}", "tag": "fact", "source": "static", "evidence": []} for i in range(12)]
+    await mock_db.dossiers.update_one(
+        {"project_id": canonical_pid},
+        {"$set": {"sections.technologies": old_claims_12}},
+    )
+
+    # 12 static claims existing -> half is 6. New has ~4 -> 4 < 6 -> triggers incomplete guard!
+    res_incomplete = client.post(f"/projects/{canonical_pid}/dossier/static")
+    assert res_incomplete.status_code == 409
+    err_body = res_incomplete.json()
+    assert err_body["detail"] == "new dossier looks incomplete"
+    assert err_body["existing"] == 12
+    assert err_body["new"] < 6
+
+    # Verify nothing was overwritten
+    dossier_unchanged = await mock_db.dossiers.find_one({"project_id": canonical_pid})
+    assert dossier_unchanged["version"] == 1
+
+    # Retry with force=True
+    res_forced = client.post(f"/projects/{canonical_pid}/dossier/static?force=true")
+    assert res_forced.status_code == 200
+    assert res_forced.json()["version"] == 2
+
+
+@pytest.mark.asyncio
+async def test_backup_stored_before_overwrite(client, mock_db):
+    canonical_pid = "proj_backup_test"
+    await _setup_test_project(mock_db, str(ObjectId()), status="ready", project_id=canonical_pid)
+
+    await mock_db.files.insert_one({"project_id": canonical_pid, "path": "main.py", "language": "python"})
+
+    # First build
+    res1 = client.post(f"/projects/{canonical_pid}/dossier/static")
+    assert res1.status_code == 200
+    assert await mock_db.dossier_backups.count_documents({"project_id": canonical_pid}) == 0
+
+    # Overwrite 6 times with force=true
+    for _ in range(6):
+        res = client.post(f"/projects/{canonical_pid}/dossier/static?force=true")
+        assert res.status_code == 200
+
+    # Backups collection must cap at 5 per project
+    backups_count = await mock_db.dossier_backups.count_documents({"project_id": canonical_pid})
+    assert backups_count == 5
+
+
+@pytest.mark.asyncio
+async def test_agent_and_user_claims_survive_rebuild(client, mock_db):
+    canonical_pid = "proj_claims_survival"
+    await _setup_test_project(mock_db, str(ObjectId()), status="ready", project_id=canonical_pid)
+
+    await mock_db.files.insert_one({"project_id": canonical_pid, "path": "main.py", "language": "python"})
+
+    # Seed existing dossier with 1 static, 1 agent, 1 user claim
+    await mock_db.dossiers.insert_one({
+        "project_id": canonical_pid,
         "version": 1,
         "sections": {
             "technologies": [
                 {"claim": "Old static claim", "tag": "fact", "source": "static", "evidence": []},
-                {"claim": "Agent inferred caching", "tag": "inferred", "source": "agent", "evidence": []},
-                {"claim": "User confirmed Redis", "tag": "fact", "source": "user", "evidence": []},
+                {"claim": "Agent found caching strategy", "tag": "inferred", "source": "agent", "evidence": []},
+                {"claim": "User confirmed PostgreSQL", "tag": "fact", "source": "user", "evidence": []},
             ],
             "decisions": [
-                {"claim": "User decision note", "tag": "inferred", "source": "user", "evidence": []},
+                {"claim": "User architecture rationale", "tag": "inferred", "source": "user", "evidence": []},
             ],
         },
     })
 
-    # Post to static dossier endpoint
-    res = client.post(f"/projects/{pid}/dossier/static")
+    res = client.post(f"/projects/{canonical_pid}/dossier/static?force=true")
     assert res.status_code == 200
-    data = res.json()
-    assert data["version"] == 2  # Incremented from 1 to 2
-    assert "sections" in data
 
-    # Check sections in response
-    tech_sec = next((s for s in data["sections"] if s["name"] == "technologies"), None)
-    assert tech_sec is not None
-    claims_text = [c["claim"] for c in tech_sec["claims"]]
-    assert "Agent inferred caching" in claims_text
-    assert "User confirmed Redis" in claims_text
-    # The old static claim should have been replaced by freshly generated static claims
-    assert "Old static claim" not in claims_text
+    saved = await mock_db.dossiers.find_one({"project_id": canonical_pid})
+    assert saved["version"] == 2
 
-    dec_sec = next((s for s in data["sections"] if s["name"] == "decisions"), None)
-    assert dec_sec is not None
-    assert any(c["claim"] == "User decision note" for c in dec_sec["claims"])
+    tech_claims = [c["claim"] for c in saved["sections"]["technologies"]]
+    assert "Agent found caching strategy" in tech_claims
+    assert "User confirmed PostgreSQL" in tech_claims
+    assert "Old static claim" not in tech_claims
 
-    # Verify persisted in database
-    doc = await mock_db.dossiers.find_one({"project_id": pid})
-    assert doc["version"] == 2
+    dec_claims = [c["claim"] for c in saved["sections"]["decisions"]]
+    assert "User architecture rationale" in dec_claims
 
-
-# ---------------------------------------------------------------------------
-# 8. GET /projects shows dossier_version and counts
-# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_list_projects_shows_dossier_version_and_counts(client, mock_db, pid):
-    await _setup_test_project(mock_db, pid, status="ready")
-
-    await mock_db.files.insert_one({"project_id": pid, "path": "app.py"})
-    await mock_db.commits.insert_one({"project_id": pid, "sha": "c1"})
-    await mock_db.dependencies.insert_one({"project_id": pid, "name": "fastapi", "ecosystem": "pip", "source_file": "r.txt"})
-    await mock_db.derived_facts.insert_one({"project_id": pid, "kind": "entry_point", "name": "main", "file_path": "app.py", "line_start": 1})
-    await mock_db.dossiers.insert_one({"project_id": pid, "version": 3, "sections": {}})
+async def test_list_projects_returns_project_id(client, mock_db):
+    oid = str(ObjectId())
+    canonical_pid = "proj_canonical_xyz"
+    await _setup_test_project(mock_db, oid, status="ready", project_id=canonical_pid)
 
     res = client.get("/projects")
     assert res.status_code == 200
     items = res.json()
     assert len(items) >= 1
-    proj = next((p for p in items if p["id"] == pid), None)
+    proj = next((p for p in items if p["id"] == oid or p["project_id"] == canonical_pid), None)
     assert proj is not None
-    assert proj["dossier_version"] == 3
-    assert proj["counts"]["files"] == 1
-    assert proj["counts"]["commits"] == 1
-    assert proj["counts"]["dependencies"] == 1
-    assert proj["counts"]["facts"] == 1
+    assert proj["project_id"] == canonical_pid

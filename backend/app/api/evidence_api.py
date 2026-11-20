@@ -7,40 +7,13 @@ import re
 from collections import Counter
 from typing import Any
 
-from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.api.resolve import resolve_project
 from app.core.db import get_db
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["evidence"])
-
-
-async def _get_project_or_404(project_id: str, db: Any) -> dict[str, Any]:
-    query = {"_id": ObjectId(project_id)} if ObjectId.is_valid(project_id) else {"_id": project_id}
-    res = db.projects.find_one(query)
-    project = await res if inspect.isawaitable(res) else res
-    if not project:
-        res2 = db.projects.find_one({"project_id": project_id})
-        project = await res2 if inspect.isawaitable(res2) else res2
-    if not project:
-        res3 = db.projects.find_one({"id": project_id})
-        project = await res3 if inspect.isawaitable(res3) else res3
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project with ID '{project_id}' not found",
-        )
-    return project
-
-
-def _project_id_candidates(project_id: str, project: dict[str, Any]) -> list[str]:
-    candidates = [project_id]
-    if "_id" in project:
-        candidates.append(str(project["_id"]))
-    if "project_id" in project and project["project_id"]:
-        candidates.append(str(project["project_id"]))
-    return list(dict.fromkeys(candidates))
 
 
 @router.get("/evidence")
@@ -50,8 +23,8 @@ async def get_evidence(
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> dict[str, Any]:
     """Retrieve detailed evidence record for a given evidence id."""
-    project = await _get_project_or_404(project_id, db)
-    pid_candidates = _project_id_candidates(project_id, project)
+    project = await resolve_project(db, project_id)
+    canonical_id = project["project_id"]
     evidence_id = id.strip()
 
     # 1. file:<path>#L<a>-<b> or #L<a> or #L<a>-L<b>
@@ -62,7 +35,7 @@ async def get_evidence(
         b_str = file_match.group(3)
 
         file_res = db.files.find_one({
-            "project_id": {"$in": pid_candidates},
+            "project_id": canonical_id,
             "path": path,
         })
         file_doc = await file_res if inspect.isawaitable(file_res) else file_res
@@ -116,7 +89,7 @@ async def get_evidence(
         sub_path = commit_match.group(2)
 
         commit_res = db.commits.find_one({
-            "project_id": {"$in": pid_candidates},
+            "project_id": canonical_id,
             "sha": {"$regex": f"^{re.escape(sha_prefix)}", "$options": "i"},
         })
         commit_doc = await commit_res if inspect.isawaitable(commit_res) else commit_res
@@ -147,7 +120,7 @@ async def get_evidence(
     if dep_match:
         dep_name = dep_match.group(1).strip()
         cursor = db.dependencies.find({
-            "project_id": {"$in": pid_candidates},
+            "project_id": canonical_id,
             "name": dep_name,
         })
         docs = await cursor.to_list(length=None) if hasattr(cursor, "to_list") else (await cursor if inspect.isawaitable(cursor) else list(cursor))
@@ -172,7 +145,7 @@ async def get_evidence(
         fact_name = fact_match.group(2).strip()
 
         cursor = db.derived_facts.find({
-            "project_id": {"$in": pid_candidates},
+            "project_id": canonical_id,
             "kind": fact_kind,
             "name": fact_name,
         })
@@ -198,14 +171,14 @@ async def get_evidence(
     if repo_match:
         repo_str = repo_match.group(1).strip()
         proj_repo = project.get("repo_full_name") or ""
-        if repo_str != proj_repo and repo_str not in pid_candidates:
+        if repo_str.lower() != proj_repo.lower() and repo_str != canonical_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
 
-        files_cur = db.files.find({"project_id": {"$in": pid_candidates}}, {"language": 1})
+        files_cur = db.files.find({"project_id": canonical_id}, {"language": 1})
         files_docs = await files_cur.to_list(length=None) if hasattr(files_cur, "to_list") else (await files_cur if inspect.isawaitable(files_cur) else list(files_cur))
         langs = Counter((f.get("language") or "Other") for f in files_docs)
 
-        commits_count_res = db.commits.count_documents({"project_id": {"$in": pid_candidates}})
+        commits_count_res = db.commits.count_documents({"project_id": canonical_id})
         commits_count = await commits_count_res if inspect.isawaitable(commits_count_res) else commits_count_res
 
         return {

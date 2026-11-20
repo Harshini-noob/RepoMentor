@@ -65,20 +65,20 @@ describe("API client error mapping", () => {
     );
   });
 
-  it("maps 409 response to generic conflict message", async () => {
+  it("maps 409 response to plain error message with existing and new counts", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 409,
-      json: async () => ({ detail: "Project status is ingesting, not ready" }),
+      json: async () => ({ detail: "new dossier looks incomplete", existing: 12, new: 4 }),
     } as Response);
 
     await expect(buildStaticDossier("proj_1")).rejects.toThrow(
-      "The project is currently busy or not ready."
+      "new dossier looks incomplete (existing: 12, new: 4)"
     );
   });
 
   it("returns parsed JSON data on successful response", async () => {
-    const fakeData = [{ id: "p1", repo_full_name: "test/repo", status: "ready" }];
+    const fakeData = [{ id: "p1", project_id: "p1", repo_full_name: "test/repo", status: "ready" }];
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,

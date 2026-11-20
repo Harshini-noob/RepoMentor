@@ -48,12 +48,10 @@ export const Dashboard: React.FC = () => {
         if (detail.status === "ready" || detail.status === "failed") {
           clearInterval(intervalId);
           pollingIntervals.current.delete(projectId);
-          // Refresh project list to reflect completed status
           const updated = await listProjects();
           setProjects(updated);
         }
       } catch {
-        // Stop polling on recurring error
         clearInterval(intervalId);
         pollingIntervals.current.delete(projectId);
       }
@@ -72,7 +70,6 @@ export const Dashboard: React.FC = () => {
     try {
       const res = await createProject(repoUrl.trim());
       setRepoUrl("");
-      // Add or update projects list
       const updated = await listProjects();
       setProjects(updated);
 
@@ -87,71 +84,100 @@ export const Dashboard: React.FC = () => {
   };
 
   return (
-    <div className="container">
-      <div className="card" style={{ marginBottom: "2rem" }}>
-        <h2 style={{ marginTop: 0, marginBottom: "0.5rem" }}>Add a repository</h2>
-        <p style={{ color: "var(--color-text-secondary)", marginTop: 0, marginBottom: "1rem" }}>
-          Provide a public GitHub repository URL to analyze and generate a dossier.
+    <div className="dashboard-container">
+      {/* Add Repository Panel */}
+      <div className="add-repo-panel">
+        <h2 className="add-repo-title">Add a Repository</h2>
+        <p className="add-repo-subtitle">
+          Connect a public GitHub repository to index code, parse commits and dependencies, and generate an interactive defense dossier.
         </p>
 
-        <form onSubmit={handleAddRepo} style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+        <form onSubmit={handleAddRepo} className="add-repo-form-row">
           <input
             type="text"
-            className="input"
+            className="add-repo-text-input"
             placeholder="https://github.com/owner/repository"
             value={repoUrl}
             onChange={(e) => setRepoUrl(e.target.value)}
             disabled={submitting}
-            style={{ flex: "1 1 300px" }}
             aria-label="GitHub Repository URL"
             required
           />
-          <button type="submit" className="button button-primary" disabled={submitting}>
-            {submitting ? "Adding..." : "Add Repository"}
+          <button type="submit" className="btn btn-primary" disabled={submitting}>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            {submitting ? "Analyzing..." : "Add Repository"}
           </button>
         </form>
 
         {submitError && (
           <div className="banner banner-error" style={{ marginTop: "1rem" }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
             {submitError}
           </div>
         )}
       </div>
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-        <h2 style={{ margin: 0 }}>Repositories</h2>
+      {/* Projects Section Header */}
+      <div className="projects-section-header">
+        <h2 className="projects-section-title">Repositories</h2>
         <button
-          className="button"
+          className="btn btn-secondary"
           onClick={fetchProjects}
           disabled={loading}
           aria-label="Refresh repository list"
         >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+            <path d="M3 3v5h5" />
+            <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+            <path d="M16 21h5v-5" />
+          </svg>
           Refresh
         </button>
       </div>
 
       {loading && (
-        <div style={{ textAlign: "center", padding: "3rem", color: "var(--color-text-secondary)" }}>
-          Loading projects...
+        <div className="state-box">
+          Loading repositories...
         </div>
       )}
 
       {error && !loading && (
-        <div className="banner banner-error" style={{ marginBottom: "1rem" }}>
+        <div className="banner banner-error">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="8" x2="12" y2="12" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
           {error}
         </div>
       )}
 
       {!loading && !error && projects.length === 0 && (
-        <div className="card" style={{ textAlign: "center", padding: "3rem 1rem" }}>
-          <p style={{ color: "var(--color-text-secondary)", margin: 0 }}>
-            No repositories analyzed yet. Add one above to get started.
-          </p>
+        <div className="state-box">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ margin: "0 auto 0.75rem", color: "var(--text-tertiary)" }}>
+            <rect width="20" height="14" x="2" y="3" rx="2" />
+            <line x1="8" y1="21" x2="16" y2="21" />
+            <line x1="12" y1="17" x2="12" y2="21" />
+          </svg>
+          <div style={{ fontWeight: 600, color: "var(--text-primary)", marginBottom: "0.25rem" }}>
+            No repositories analyzed yet
+          </div>
+          <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)" }}>
+            Add a public GitHub repository URL above to get started.
+          </div>
         </div>
       )}
 
       {!loading && !error && projects.length > 0 && (
-        <div className="project-grid">
+        <div className="projects-cards-grid">
           {projects.map((p) => {
             const statusClass =
               p.status === "ready"
@@ -170,31 +196,42 @@ export const Dashboard: React.FC = () => {
 
             const dossierLabel =
               p.dossier_version !== undefined && p.dossier_version !== null
-                ? `Dossier v${p.dossier_version}`
+                ? `v${p.dossier_version}`
                 : "No dossier";
 
             return (
-              <div key={p.id} className="card project-card">
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.5rem" }}>
+              <div key={p.project_id} className="project-summary-card">
+                <div className="project-summary-top">
                   <Link
-                    to={`/projects/${p.id}/dossier`}
-                    className="project-name"
+                    to={`/projects/${p.project_id}/dossier`}
+                    className="project-title-link"
                     title={`View dossier for ${p.repo_full_name}`}
                   >
                     {p.repo_full_name}
                   </Link>
-                  <span className={`status-chip ${statusClass}`}>{p.status}</span>
+                  <span className={`status-chip ${statusClass}`}>
+                    {p.status}
+                  </span>
                 </div>
 
-                <div className="project-meta">
-                  <span>{dossierLabel}</span>
+                <div className="project-stats-pills">
+                  <span className="project-stat-item">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
+                    </svg>
+                    Dossier {dossierLabel}
+                  </span>
                   <span>•</span>
-                  <span>{p.counts ? `${p.counts.files} files` : "0 files"}</span>
+                  <span className="project-stat-item">
+                    {p.counts ? `${p.counts.files} files` : "0 files"}
+                  </span>
                   <span>•</span>
-                  <span>{p.counts ? `${p.counts.commits} commits` : "0 commits"}</span>
+                  <span className="project-stat-item">
+                    {p.counts ? `${p.counts.commits} commits` : "0 commits"}
+                  </span>
                 </div>
 
-                <div style={{ fontSize: "0.75rem", color: "var(--color-text-secondary)", marginTop: "0.5rem" }}>
+                <div className="project-card-footer">
                   Analyzed: {analyzedDate}
                 </div>
               </div>

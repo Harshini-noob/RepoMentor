@@ -18,5 +18,10 @@ export const TagBadge: React.FC<TagBadgeProps> = ({ tag }) => {
     className = 'tag-badge inferred';
   }
 
-  return <span className={className}>{label}</span>;
+  return (
+    <span className={className}>
+      <span className="tag-dot" aria-hidden="true" />
+      {label}
+    </span>
+  );
 };

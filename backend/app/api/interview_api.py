@@ -27,6 +27,7 @@ from app.api.models import (
     ProfileMissItem,
     ProfileResponse,
 )
+from app.api.resolve import resolve_project
 from app.core.db import get_db
 from app.interview.engine import (
     EngineStateError,
@@ -48,30 +49,17 @@ router = APIRouter(prefix="/projects/{project_id}", tags=["interview"])
 
 
 async def _get_project_or_404(project_id: str, db: Any) -> dict[str, Any]:
-    query = {"_id": ObjectId(project_id)} if ObjectId.is_valid(project_id) else {"_id": project_id}
-    res = db.projects.find_one(query)
-    project = await res if inspect.isawaitable(res) else res
-    if not project:
-        res2 = db.projects.find_one({"project_id": project_id})
-        project = await res2 if inspect.isawaitable(res2) else res2
-    if not project:
-        res3 = db.projects.find_one({"id": project_id})
-        project = await res3 if inspect.isawaitable(res3) else res3
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project with ID '{project_id}' not found",
-        )
-    return project
+    return await resolve_project(db, project_id)
 
 
 async def _get_session_or_404(project_id: str, session_id: str, db: Any) -> dict[str, Any]:
-    await _get_project_or_404(project_id, db)
+    project = await _get_project_or_404(project_id, db)
+    canonical_id = project["project_id"]
     session = await get_interview_session(db, session_id)
-    if not session or session.get("project_id") != project_id:
+    if not session or session.get("project_id") not in (canonical_id, project_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Interview session '{session_id}' not found for project '{project_id}'",
+            detail=f"Interview session '{session_id}' not found for project '{canonical_id}'",
         )
     return session
 
@@ -304,10 +292,11 @@ async def create_interview_session(
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> InterviewSessionCreateResponse:
     """Create a new interview session. Does not hold the model lock."""
-    await _get_project_or_404(project_id, db)
+    project = await _get_project_or_404(project_id, db)
+    canonical_id = project["project_id"]
     session = await start(
         db=db,
-        project_id=project_id,
+        project_id=canonical_id,
         questions=payload.questions,
         difficulty=payload.difficulty,
         adaptive=payload.adaptive,

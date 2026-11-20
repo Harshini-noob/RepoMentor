@@ -22,41 +22,24 @@ from app.api.models import (
     ChatSessionDetailResponse,
     ChatSessionSummaryItem,
 )
+from app.api.resolve import resolve_project
 from app.core.db import get_db
 from app.mentor.chat import ask
 from app.mentor.sessions import create_session, get_session
 
 logger = logging.getLogger("repomentor.api.mentor")
 
-router = APIRouter(prefix="/projects/{project_id}", tags=["mentor"])
+router = APIRouter(prefix="/projects/{project_id:path}", tags=["mentor"])
 
 _chat_lock = get_model_lock()
 
 
-async def _get_project_or_404(project_id: str, db: Any) -> dict[str, Any]:
-    query = {"_id": ObjectId(project_id)} if ObjectId.is_valid(project_id) else {"_id": project_id}
-    res = db.projects.find_one(query)
-    project = await res if inspect.isawaitable(res) else res
-    if not project:
-        res2 = db.projects.find_one({"project_id": project_id})
-        project = await res2 if inspect.isawaitable(res2) else res2
-    if not project:
-        res3 = db.projects.find_one({"id": project_id})
-        project = await res3 if inspect.isawaitable(res3) else res3
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project with ID '{project_id}' not found",
-        )
-    return project
-
-
 async def _get_ready_project_or_409(project_id: str, db: Any) -> dict[str, Any]:
-    project = await _get_project_or_404(project_id, db)
+    project = await resolve_project(db, project_id)
     if project.get("status") != "ready":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Project '{project_id}' is not ready yet (current status: '{project.get('status')}')",
+            detail=f"Project '{project['project_id']}' is not ready yet (current status: '{project.get('status')}')",
         )
     return project
 
@@ -71,8 +54,9 @@ async def create_chat_session(
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> ChatSessionCreateResponse:
     """Create a new chat session for a project. 404 if unknown, 409 if not ready."""
-    await _get_ready_project_or_409(project_id, db)
-    session_id = await create_session(db, project_id, mode="mentor")
+    project = await _get_ready_project_or_409(project_id, db)
+    canonical_id = project["project_id"]
+    session_id = await create_session(db, canonical_id, mode="mentor")
     return ChatSessionCreateResponse(session_id=session_id)
 
 
@@ -86,12 +70,13 @@ async def get_chat_session(
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> ChatSessionDetailResponse:
     """Retrieve details and messages of a chat session. 404 if missing or another project."""
-    await _get_project_or_404(project_id, db)
+    project = await resolve_project(db, project_id)
+    canonical_id = project["project_id"]
     session = await get_session(db, session_id)
-    if not session or session.get("project_id") != project_id:
+    if not session or session.get("project_id") not in (canonical_id, project_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session '{session_id}' not found for project '{project_id}'",
+            detail=f"Session '{session_id}' not found for project '{canonical_id}'",
         )
     messages = [
         ChatMessageItem(
@@ -117,8 +102,9 @@ async def list_chat_sessions(
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> list[ChatSessionSummaryItem]:
     """Retrieve the newest 20 chat sessions for a project."""
-    await _get_project_or_404(project_id, db)
-    cur = db.sessions.find({"project_id": project_id}).sort("created_at", -1).limit(20)
+    project = await resolve_project(db, project_id)
+    canonical_id = project["project_id"]
+    cur = db.sessions.find({"project_id": {"$in": [canonical_id, project_id]}}).sort("created_at", -1).limit(20)
     if hasattr(cur, "to_list"):
         docs = await cur.to_list(20)
     elif inspect.isawaitable(cur):
@@ -150,17 +136,18 @@ async def chat_stream(
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> StreamingResponse:
     """Stream mentor chat events via SSE."""
-    await _get_ready_project_or_409(project_id, db)
+    project = await _get_ready_project_or_409(project_id, db)
+    canonical_id = project["project_id"]
 
     if payload.session_id is None:
-        session_id = await create_session(db, project_id, mode="mentor")
+        session_id = await create_session(db, canonical_id, mode="mentor")
     else:
         session_id = payload.session_id
         session = await get_session(db, session_id)
-        if not session or session.get("project_id") != project_id:
+        if not session or session.get("project_id") not in (canonical_id, project_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Session '{session_id}' not found for project '{project_id}'",
+                detail=f"Session '{session_id}' not found for project '{canonical_id}'",
             )
 
     if _chat_lock.locked():
@@ -177,13 +164,15 @@ async def chat_stream(
         queue.put_nowait({"type": "event", "text": text})
 
     def on_step(step: TraceStep) -> None:
+        prev = getattr(step, "result_preview", None) or getattr(step, "preview", "")
+        ev = getattr(step, "evidence_ids", None) or getattr(step, "evidence", [])
         step_data = {
             "type": "step",
             "step": step.step,
             "tool": step.tool,
             "args": step.args,
-            "preview": (step.result_preview or "")[:300],
-            "evidence": (step.evidence_ids or [])[:8],
+            "preview": (prev or "")[:300],
+            "evidence": (ev or [])[:8],
             "ms": step.ms,
             "tokens": step.tokens,
         }
@@ -193,7 +182,7 @@ async def chat_stream(
         try:
             run_res = await ask(
                 db=db,
-                project_id=project_id,
+                project_id=canonical_id,
                 session_id=session_id,
                 message=payload.message,
                 on_step=on_step,

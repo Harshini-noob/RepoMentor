@@ -8,6 +8,7 @@ from app.api.models import (
     DerivedFactResponse,
     TimelineResponse,
 )
+from app.api.resolve import resolve_project
 from app.core.db import get_db
 
 router = APIRouter(prefix="/projects", tags=["analysis"])
@@ -18,11 +19,7 @@ async def _get_ready_project(id: str, db: AsyncIOMotorDatabase) -> dict[str, Any
     Validate that the project exists and is in 'ready' status.
     Raises 404 if unknown, 409 if not ready yet.
     """
-    query = {"_id": ObjectId(id)} if ObjectId.is_valid(id) else {"_id": id}
-    project = await db.projects.find_one(query)
-
-    if not project:
-        raise HTTPException(status_code=404, detail=f"Project with ID '{id}' not found")
+    project = await resolve_project(db, id)
 
     status = project.get("status")
     if status != "ready":
@@ -34,16 +31,17 @@ async def _get_ready_project(id: str, db: AsyncIOMotorDatabase) -> dict[str, Any
     return project
 
 
-@router.get("/{id}/dependencies", response_model=list[DependencyResponse])
+@router.get("/{id:path}/dependencies", response_model=list[DependencyResponse])
 async def get_dependencies(
     id: str,
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> list[DependencyResponse]:
     """Retrieve all parsed dependencies for a project."""
-    await _get_ready_project(id, db)
+    project = await _get_ready_project(id, db)
+    canonical_id = project["project_id"]
 
     deps: list[DependencyResponse] = []
-    cursor = db.dependencies.find({"project_id": id}).sort("name", 1)
+    cursor = db.dependencies.find({"project_id": canonical_id}).sort("name", 1)
     async for doc in cursor:
         deps.append(
             DependencyResponse(
@@ -57,7 +55,7 @@ async def get_dependencies(
     return deps
 
 
-@router.get("/{id}/facts", response_model=list[DerivedFactResponse])
+@router.get("/{id:path}/facts", response_model=list[DerivedFactResponse])
 async def get_derived_facts(
     id: str,
     kind: str | None = Query(default=None, description="Filter facts by kind (route, component, database, ml, entry_point, env_var, test)"),
@@ -66,9 +64,10 @@ async def get_derived_facts(
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> list[DerivedFactResponse]:
     """Retrieve statically derived code facts for a project, optionally filtered by kind."""
-    await _get_ready_project(id, db)
+    project = await _get_ready_project(id, db)
+    canonical_id = project["project_id"]
 
-    filter_query: dict[str, Any] = {"project_id": id}
+    filter_query: dict[str, Any] = {"project_id": canonical_id}
     if kind:
         filter_query["kind"] = kind
 
@@ -88,18 +87,19 @@ async def get_derived_facts(
     return facts
 
 
-@router.get("/{id}/timeline", response_model=TimelineResponse)
+@router.get("/{id:path}/timeline", response_model=TimelineResponse)
 async def get_timeline(
     id: str,
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> TimelineResponse:
     """Retrieve the commit timeline, weekly churn, and first-seen metadata for a project."""
     project = await _get_ready_project(id, db)
+    canonical_id = project["project_id"]
 
-    timeline_doc = await db.timeline.find_one({"project_id": id})
+    timeline_doc = await db.timeline.find_one({"project_id": canonical_id})
     if not timeline_doc:
         timeline_doc = {
-            "project_id": id,
+            "project_id": canonical_id,
             "weekly_buckets": [],
             "biggest_commits": [],
             "dependency_first_seen": {},

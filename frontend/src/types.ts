@@ -14,6 +14,7 @@ export interface ProjectDetailCounts {
 
 export interface ProjectSummary {
   id: string;
+  project_id: string;
   repo_full_name: string;
   status: 'queued' | 'ingesting' | 'ready' | 'failed' | string;
   facts_status?: string | null;
@@ -27,6 +28,7 @@ export interface ProjectSummary {
 
 export interface ProjectDetail {
   id: string;
+  project_id: string;
   repo_full_name: string;
   status: 'queued' | 'ingesting' | 'ready' | 'failed' | string;
   facts_status?: string | null;
@@ -44,6 +46,7 @@ export interface DossierSectionSummary {
   inferred: number;
   uncertain: number;
   user_edited: number;
+  agent?: number;
 }
 
 export type DossierSummarySection = DossierSectionSummary;
@@ -76,10 +79,7 @@ export interface DossierSectionDetail {
 
 export interface StaticDossierBuildResult {
   version: number;
-  sections: Array<{
-    name: string;
-    claims: DossierClaim[];
-  }>;
+  sections: Record<string, number>;
 }
 
 export interface FileEvidenceLine {
@@ -162,10 +162,14 @@ export type EvidenceResult =
 
 export class ApiError extends Error {
   status?: number;
+  existing?: number;
+  newCount?: number;
 
-  constructor(message: string, status?: number) {
+  constructor(message: string, status?: number, existing?: number, newCount?: number) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.existing = existing;
+    this.newCount = newCount;
   }
 }

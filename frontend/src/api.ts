@@ -38,7 +38,32 @@ async function fetchWithTimeout<T>(
     });
 
     if (!response.ok) {
-      throw new ApiError(mapStatusToGenericMessage(response.status), response.status);
+      let serverMsg: string | undefined;
+      let existingVal: number | undefined;
+      let newVal: number | undefined;
+
+      if (response.status === 409) {
+        try {
+          const errData = await response.json();
+          if (errData && typeof errData.detail === 'string') {
+            serverMsg = errData.detail;
+            if (errData.existing !== undefined && errData.new !== undefined) {
+              existingVal = errData.existing;
+              newVal = errData.new;
+              serverMsg = `${errData.detail} (existing: ${errData.existing}, new: ${errData.new})`;
+            }
+          }
+        } catch {
+          // ignore JSON parse error
+        }
+      }
+
+      throw new ApiError(
+        serverMsg || mapStatusToGenericMessage(response.status),
+        response.status,
+        existingVal,
+        newVal
+      );
     }
 
     return (await response.json()) as T;
@@ -100,10 +125,12 @@ export async function getDossierSection(
 }
 
 export async function buildStaticDossier(
-  project_id: string
+  project_id: string,
+  force: boolean = false
 ): Promise<StaticDossierBuildResult> {
+  const query = force ? '?force=true' : '';
   return fetchWithTimeout<StaticDossierBuildResult>(
-    `${API_BASE_URL}/projects/${encodeURIComponent(project_id)}/dossier/static`,
+    `${API_BASE_URL}/projects/${encodeURIComponent(project_id)}/dossier/static${query}`,
     {
       method: 'POST',
     }
