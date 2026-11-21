@@ -1,12 +1,12 @@
 # RepoMentor
 
-**RepoMentor** is an AI-powered technical interview coach and repository intelligence platform. It analyzes your GitHub codebase, extracts verifiable architectural facts, and provides grounded conversational mentoring and realistic interview practice so you can master and defend your own software projects.
+**RepoMentor** is an AI-powered technical interview coach and repository intelligence platform. It analyzes your GitHub codebase, extracts verifiable architectural facts, and provides grounded conversational mentoring and realistic mock interview practice so you can master and defend your own software projects with confidence.
 
 ---
 
 ## Architecture Overview
 
-RepoMentor consists of an evidence-grounded agent, an adaptive interview engine, and a FastAPI service backed by MongoDB:
+RepoMentor integrates a full-stack architecture featuring a React frontend, evidence-grounded ReAct agent, adaptive interview state machine, and FastAPI backend backed by MongoDB:
 
 ```
                   +--------------------------------------------------+
@@ -16,7 +16,7 @@ RepoMentor consists of an evidence-grounded agent, an adaptive interview engine,
                                 [ Ingestion & Parsers ]
                                            v
                   +--------------------------------------------------+
-                  |          MongoDB (Dossiers, Facts, Sessions)     |
+                  |         MongoDB (Dossiers, Facts, Sessions)      |
                   +--------------------------------------------------+
                                            |
                    +-----------------------+-----------------------+
@@ -25,7 +25,7 @@ RepoMentor consists of an evidence-grounded agent, an adaptive interview engine,
      +---------------------------+                   +---------------------------+
      |   RepoMentor Chat Agent   |                   |  Interview Engine Machine |
      |  (Grounded ReAct Loop,    |                   |   (Adaptive Plan, Rubric, |
-     |   Citations & Tool Calls) |                   |   Teaching Cycle & Eval)  |
+     |   Citations & Repair)     |                   |   Teaching Cycle & Eval)  |
      +---------------------------+                   +---------------------------+
                    |                                               |
                    +-----------------------+-----------------------+
@@ -33,48 +33,81 @@ RepoMentor consists of an evidence-grounded agent, an adaptive interview engine,
                                            v
                   +--------------------------------------------------+
                   |         FastAPI REST API & SSE Streaming         |
-                  |     (Model Concurrency Lock, Anti-Leak Engine)   |
+                  |     (Canonical Resolver, Concurrency Lock)       |
                   +--------------------------------------------------+
                                            |
-                        +------------------+------------------+
-                        |                                     |
-                        v                                     v
-                  CLI Interface                        HTTP API Clients
-             (`python -m app.cli`)             (`scripts/api_interview_demo.py`)
+                   +-----------------------+-----------------------+
+                   |                                               |
+                   v                                               v
+     +---------------------------+                   +---------------------------+
+     |     React 18 Frontend     |                   |       CLI Interface       |
+     | (Dashboard, Dossier, Chat,|                   |   (`python -m app.cli`)   |
+     |  Interview, Progress Hub) |                   |                           |
+     +---------------------------+                   +---------------------------+
 ```
 
 ---
 
-## What Has Been Achieved So Far
+## Features Achieved So Far
 
 ### 1. Repository Ingestion & Codebase Intelligence
-- **Multi-Source Ingestion:** Fetches code trees, commits, pull requests, issues, and metadata from GitHub.
+- **Multi-Source Ingestion:** Fetches file trees, commits, pull requests, issues, and metadata from GitHub.
 - **Dependency Manifest Parsing:** Extracts dependencies across Python (`pyproject.toml`, `requirements.txt`, `Pipfile`), Node (`package.json`), Rust (`Cargo.toml`), and Go (`go.mod`).
 - **Static Fact Derivation:** Discovers endpoints, database clients, authentication handlers, external services, and component architecture.
 - **Commit Timeline Analytics:** Analyzes commit velocity, codebase evolution buckets, author activity, and first-seen component dates.
-- **Structured Project Dossier:** Distills repository understanding into 9 curated sections (`technologies`, `apis`, `components`, `data`, `decisions`, `features`, `timeline`, `quality`, `identity`) with confidence tags and user editability.
+- **Structured Project Dossier:** Distills repository understanding into 9 curated sections (`identity`, `technologies`, `components`, `apis`, `data`, `features`, `decisions`, `timeline`, `quality`) with confidence tags and user editability.
+- **Canonical Project Resolution:** Resolves project identifiers cleanly across URL slugs, project IDs, and repository full names without identifier mismatches.
 
-### 2. Evidence-Grounded Mentor Agent
-- **ReAct Investigation Agent:** An agent that inspects real code, commit logs, and dependency trees using tools (`get_dossier`, `read_file`, `search_code`, `get_commit`, `get_timeline`, `get_dependencies`).
-- **Strict Evidence Citation:** Every claim is tagged (`[Fact]`, `[Inferred]`, `[Uncertain]`, `[General]`) and mapped to verified evidence IDs (`file:...`, `commit:...`, `pr:...`). Unverified claims and hallucinated quotes are blocked or repaired.
-- **Model Fallback & Resilience:** Automatic fallback and exponential backoff on 429 rate limits across LLM providers.
-- **Streaming Chat:** Real-time Server-Sent Events (SSE) streaming with live trace steps (`step`, `event`, `answer`, `done`).
+### 2. Evidence-Grounded Mentor Agent & Policy Engine
+- **ReAct Investigation Agent:** Autonomously inspects code, commit logs, and dependency trees using tools (`get_dossier`, `read_file`, `search_code`, `get_commit`, `get_timeline`, `get_dependencies`).
+- **Strict Evidence Citation:** Every claim is tagged (`[Fact]`, `[Inferred]`, `[Uncertain]`, `[General]`) and mapped to verified evidence IDs (`file:...`, `commit:...`, `pr:...`, `dep:...`, `fact:...`, `repo:...`).
+- **Automated Citation Repair:** Detects unrecognised bracket tokens (e.g. `[dossier:apis]`) and unsupported claims, triggering a targeted repair turn that supplies real collected evidence IDs (`Valid ids you can cite: ...`). If uncorrected, it safely downgrades unverified claims to `[Inferred]` and appends verification notes.
+- **Quote Verification:** Strips hallucinated code blocks and warns on quotes not found in actual tool results.
+- **Model Fallback & Resilience:** Automatic fallback and exponential backoff across model tiers on 429 rate limits or provider quotas.
 
 ### 3. Adaptive Technical Interview & Teaching Engine
-- **Targeted Question Generation:** Dynamically generates interview questions across categories (`tech`, `arch`, `behavioral`, `problem`, `tradeoff`) tailored to difficulty levels (1-5) and specific repository claims.
+- **Targeted Question Generation:** Dynamically generates interview questions across categories (`tech`, `architecture`, `history`, `problem`, `tradeoff`) tailored to difficulty levels (1-5) and specific repository claims.
 - **Rubric-Driven Evaluation:** Evaluates candidate answers against multi-point rubrics (`points`, `misconceptions`, `unverified claims`, `strengths`, and `advice`) with objective scoring (0-4).
 - **Automated Teaching Cycle:**
   - Identifies weak answers (score $\le 2$).
   - Delivers a grounded micro-lesson on the exact missed concepts.
   - Automatically generates a focused follow-up probe question.
   - Prompts a retry on the original question with before/after progress scoring and copy-paste detection.
-- **Learner Profile Tracking:** Maintains continuous mastery profiles per concept, recording recurrent gaps and suggesting prioritized revision topics.
-
-### 4. Robust State Machine & HTTP API (Phase 8)
-- **Pure State Machine Engine (`app/interview/engine.py`):** Non-printing, stage-based lifecycle (`need_question`, `awaiting_answer`, `need_lesson`, `need_followup`, `need_retry`, `finished`) with `start`, `next_action`, `submit_answer`, `skip`, and `get_state`.
-- **Security & Integrity Rules:** Strips rubrics (`key_points`, `common_mistakes`, `seed`) from API responses to prevent candidate cheating.
+- **Pure State Machine (`app/interview/engine.py`):** Non-printing, stage-based lifecycle (`need_question`, `awaiting_answer`, `need_lesson`, `need_followup`, `need_retry`, `finished`) with anti-cheat protection stripping rubrics from candidate responses.
 - **Model Concurrency Locking (`app/api/locks.py`):** Prevents race conditions and model overload between chat and interview endpoints with structured 409 responses.
-- **Test-Driven Reliability:** Comprehensive test suite of **349 passing tests** covering state transitions, error handling, lock contention, and grounded evaluations.
+
+### 4. React Web Application (`frontend/`)
+- **Projects Dashboard:** Overview of imported repositories with language breakdown, stats, and one-click access.
+- **Visual Dossier Explorer:**
+  - Browse claims across all 9 architectural sections.
+  - Filter by claim tags (`[Fact]`, `[Inferred]`, `[Uncertain]`) with live count badges.
+  - Instant client-side keyword and stem search within section claims.
+  - One-click static dossier rebuild trigger.
+- **Interactive Evidence Drawer:**
+  - Clickable evidence chips embedded in dossier claims and chat answers.
+  - Slide-over drawer with syntax-highlighted code viewer and context line windowing.
+  - Commit detail viewer showing commit messages, authors, +/- line stats, and touched files.
+- **Real-Time Mentor Chat (`/projects/:id/chat`):**
+  - Streaming conversational interface powered by Server-Sent Events (SSE).
+  - Live trace step inspection (tool name, arguments, preview, timing, token count).
+  - Clickable evidence chips rendered inline without unsafe HTML.
+  - Auto-scrolling, textarea resizing, example starter prompts, and model busy handling.
+- **Interview Studio (`/projects/:id/interview`):**
+  - Full interview stage with question metadata, difficulty badges, and keyboard shortcuts (`Cmd/Ctrl + Enter`).
+  - Interactive evaluation card displaying score (handling `0/4` properly), coverage %, rubric points, and advice.
+  - Micro-lesson view with grounded explanations for missed concepts.
+  - Retry mode with before/after score tracking and copy-paste detection banner.
+  - Comprehensive final report: question breakdown table, weakest-concept chips, and improvement history.
+- **Learner Progress Dashboard (`/projects/:id/progress`):**
+  - Concept mastery cards sorted with weakest first.
+  - Concept scores (handling `0/4` and decimals), status pills (`learning`, `mastered`), and attempt metrics.
+  - General concepts categorized as `Uncategorised` and listed last.
+  - "Revise first" priority list and one-click "Practice weakest" interview trigger.
+  - Historical session report inspection modal.
+
+### 5. Rigorous Test Suite
+- **Backend:** **367 passing tests** covering ingestion, derivation, agent loop, tools, interview state machine, API endpoints, locks, and evidence resolution.
+- **Frontend:** **46 passing tests** across 11 test suites with Vitest, React Testing Library, and TypeScript compilation validation (`tsc && vite build`).
 
 ---
 
@@ -82,12 +115,14 @@ RepoMentor consists of an evidence-grounded agent, an adaptive interview engine,
 
 ### 1. Prerequisites
 - Python 3.11+
+- Node.js 18+ and npm
 - MongoDB instance (running locally or via MongoDB Atlas)
 - LLM API key (Groq, OpenAI, or any OpenAI-compatible provider)
 
-### 2. Installation & Configuration
-From the `backend` directory:
+### 2. Backend Setup
+From the root directory:
 ```powershell
+cd backend
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
@@ -103,46 +138,51 @@ LLM_MODEL=openai/gpt-oss-120b
 LLM_FALLBACK_MODEL=openai/gpt-oss-20b
 ```
 
-### 3. Start Server
+Start the backend server:
 ```powershell
 uvicorn app.main:app --reload --port 8000
 ```
 - Interactive Swagger API docs: `http://localhost:8000/docs`
 - Health check: `http://localhost:8000/health`
 
-### 4. Interactive Interview Demo
-Test the complete interview flow via HTTP API:
+### 3. Frontend Setup
+In a new terminal:
 ```powershell
-python scripts/api_interview_demo.py <project_id>
+cd frontend
+npm install
+npm run dev
 ```
+Open `http://localhost:5173` in your browser.
 
-### 5. Run Tests
+### 4. Running Tests
+Run backend tests:
 ```powershell
 cd backend
 python -m pytest
 ```
 
+Run frontend tests and build:
+```powershell
+cd frontend
+npm test
+npm run build
+```
+
 ---
 
-## What Will Be Achieved Further (Roadmap)
+## Roadmap: What Will Be Achieved Further
 
-1. **Web User Interface (Frontend)**
-   - **Interactive Interview Stage:** Web-based interview studio with timer, Markdown answer editor, instant rubric feedback, interactive lessons, and score improvement visualization.
-   - **Visual Repo Dossier:** Exploratory graph of architectural components, endpoints, and key engineering trade-offs.
-   - **Learner Profile Dashboard:** Visual concept radar chart highlighting strengths, weak points, and revision priorities.
-   - **Mentor Chatroom:** Real-time conversational interface with streaming responses and expandable evidence inspection.
+1. **Voice & Live Audio Interview Simulation**
+   - Real-time WebRTC or WebSocket audio streaming for conversational mock interviews.
+   - Low-latency speech-to-text with conversational pause detection and audio interruptions.
 
-2. **Voice & Live Audio Interview Simulation**
-   - WebRTC / WebSocket audio streaming for hands-free verbal technical mock interviews.
-   - Speech-to-text with conversational pause detection and natural speaking cadence.
+2. **Advanced Static Analysis & Code Graphs**
+   - AST symbol indexing, call graph generation, and data flow tracing across multi-repo dependencies.
+   - Automatic architectural pattern recognition (Event-driven, CQRS, Hexagonal, Clean Architecture).
 
-3. **Advanced Static Analysis & Code Graphs**
-   - AST-level symbol resolution, call graph construction, and data flow mapping.
-   - Automatic detection of complex design patterns (event sourcing, CQRS, dependency injection, middleware pipelines).
+3. **IDE & Agent Extensions (MCP Protocol)**
+   - Model Context Protocol (MCP) server integration allowing RepoMentor intelligence to be queried directly inside Antigravity, VS Code, and Cursor.
 
-4. **IDE & Protocol Integrations (MCP)**
-   - Implementation of Model Context Protocol (MCP) server so RepoMentor can directly provide repository insights to Cursor, Antigravity, and VS Code.
-
-5. **Multi-Project Comparison & Benchmarking**
-   - Comparative analysis across multiple repositories to measure architectural evolution and candidate readiness across different tech stacks.
-
+4. **Multi-Repository Benchmarking & Team Readiness**
+   - Cross-repository skill profiles comparing candidate mastery across multiple codebases.
+   - Team onboarding tracks with progressive mastery roadmaps.
