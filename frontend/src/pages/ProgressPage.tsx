@@ -103,8 +103,12 @@ export const ProgressPage: React.FC = () => {
     }
   };
 
-  // Sort concepts with weak concepts first
+  // Sort concepts with weak concepts first, and "general" / "Uncategorised" always last
   const sortedConcepts = [...(profile?.concepts || [])].sort((a, b) => {
+    const aIsGeneral = a.concept.toLowerCase() === 'general' || a.concept.toLowerCase() === 'uncategorised';
+    const bIsGeneral = b.concept.toLowerCase() === 'general' || b.concept.toLowerCase() === 'uncategorised';
+    if (aIsGeneral && !bIsGeneral) return 1;
+    if (!aIsGeneral && bIsGeneral) return -1;
     if (a.score !== b.score) return a.score - b.score;
     return a.concept.localeCompare(b.concept);
   });
@@ -207,6 +211,7 @@ export const ProgressPage: React.FC = () => {
             <h2 className="card-heading">Concept Breakdown (Weakest first)</h2>
             <div className="concepts-grid">
               {sortedConcepts.map((item) => {
+                const conceptName = item.concept.toLowerCase() === 'general' ? 'Uncategorised' : item.concept;
                 const scorePercent = Math.min(100, Math.max(0, (item.score / 4) * 100));
                 const statusClass =
                   item.status === 'mastered'
@@ -218,7 +223,7 @@ export const ProgressPage: React.FC = () => {
                 return (
                   <div key={item.concept} className="concept-card">
                     <div className="concept-card-header">
-                      <h3 className="concept-card-title">{item.concept}</h3>
+                      <h3 className="concept-card-title">{conceptName}</h3>
                       <span className={`status-pill ${statusClass}`}>{item.status}</span>
                     </div>
 
@@ -226,7 +231,13 @@ export const ProgressPage: React.FC = () => {
                     <div className="score-bar-container">
                       <div className="score-bar-header">
                         <span className="score-label">Score</span>
-                        <span className="score-number">{item.score.toFixed(1)} / 4</span>
+                        <span className="score-number">
+                          {item.score !== null && item.score !== undefined
+                            ? item.score === 0
+                              ? '0/4'
+                              : `${item.score.toFixed(1)} / 4`
+                            : '—'}
+                        </span>
                       </div>
                       <div
                         className="score-bar-track"
@@ -234,7 +245,13 @@ export const ProgressPage: React.FC = () => {
                         aria-valuenow={item.score}
                         aria-valuemin={0}
                         aria-valuemax={4}
-                        aria-label={`${item.concept} score: ${item.score.toFixed(1)} of 4`}
+                        aria-label={`${conceptName} score: ${
+                          item.score !== null && item.score !== undefined
+                            ? item.score === 0
+                              ? '0/4'
+                              : `${item.score.toFixed(1)} of 4`
+                            : '0 of 4'
+                        }`}
                       >
                         <div
                           className="score-bar-fill"
@@ -346,8 +363,20 @@ export const ProgressPage: React.FC = () => {
                         <td>#{idx + 1}</td>
                         <td>{row.round || 'tech'}</td>
                         <td>Level {row.difficulty || 2}</td>
-                        <td><span className="concept-chip">{row.concept || 'General'}</span></td>
-                        <td>{row.score !== null && row.score !== undefined ? `${row.score}/4` : 'Skipped'}</td>
+                        <td>
+                          <span className="concept-chip">
+                            {row.concept?.toLowerCase() === 'general'
+                              ? 'Uncategorised'
+                              : row.concept || 'General'}
+                          </span>
+                        </td>
+                        <td>
+                          {row.score !== null && row.score !== undefined
+                            ? `${row.score}/4`
+                            : (row as any).status === 'no_question'
+                            ? 'No question'
+                            : 'Skipped'}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

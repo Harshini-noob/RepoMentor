@@ -22,12 +22,15 @@ CITE_RE = re.compile(
     r"|pr:\d+"
     r"|dep:[^\s\]\)\u3011,]+"
     r"|fact:[a-z_]+:[^\s\]\)\u3011,]+"
+    r"|repo:[^\s\]\)\u3011,]+"
     r"|overview:[^\s\]\)\u3011,]+)"
     r"(?![^\s\]\)\u3011#,.;:])"
 )
 EVIDENCE_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(?:file|commit|pr|dep|fact):[^\s\]\),]*"
+    r"(?<![A-Za-z0-9_])(?:file|commit|pr|dep|fact|repo):[^\s\]\),]*"
 )
+VALID_CITATION_PREFIXES = {"file", "commit", "pr", "dep", "fact", "repo"}
+UNRECOGNISED_CITE_RE = re.compile(r"\[([a-zA-Z0-9_]+):([^\]]*)\]")
 FILE_RE = re.compile(r"file:(?P<path>[^#]+)#L(?P<s>\d+)(?:-L?(?P<e>\d+))?")
 COMMIT_RE = re.compile(
     r"commit:(?P<sha>[0-9a-fA-F]{7,40})(?::(?P<path>[^\s\]\)#,]+))?"
@@ -214,3 +217,88 @@ def remove_unverified_code_blocks(answer: str, tool_texts, evidence_ids=()) -> s
         return match.group(0)
 
     return FENCED_CODE_RE.sub(replace_block, answer)
+
+
+def find_unrecognised_citations(answer: str) -> list[str]:
+    """Find bracketed tokens of the form [word:rest] whose word is not in VALID_CITATION_PREFIXES
+    on [Fact] lines.
+    """
+    unrec = []
+    for line in answer.splitlines():
+        if re.match(r"^(?:[-*+]\s+)?\[Fact\]", line, re.IGNORECASE):
+            for m in UNRECOGNISED_CITE_RE.finditer(line):
+                word = m.group(1).lower()
+                if word not in VALID_CITATION_PREFIXES:
+                    token = m.group(0)
+                    if token not in unrec:
+                        unrec.append(token)
+    return unrec
+
+
+def repair_uncited_fact_lines(answer: str, evidence_ids=()) -> tuple[str, int]:
+    """For any [Fact] line with unrecognised bracket tokens lacking a valid citation backed by evidence_ids,
+    remove unrecognised bracket tokens [word:rest] (where word not in VALID_CITATION_PREFIXES),
+    and change the [Fact] tag to [Inferred].
+    Returns (updated_answer, count_of_converted_lines).
+    """
+    lines, others, commits = _covered(evidence_ids)
+
+    def has_valid_id(text: str) -> bool:
+        for raw in CITE_RE.findall(text):
+            cite = raw.rstrip(".;:")
+            if not CITE_RE.fullmatch(cite):
+                continue
+            m = FILE_RE.fullmatch(cite)
+            if m:
+                s = int(m["s"])
+                e = int(m["e"] or s)
+                have = lines.get(m["path"], set())
+                if all(n in have for n in range(s, e + 1)):
+                    return True
+            else:
+                commit_match = COMMIT_RE.fullmatch(cite)
+                if commit_match:
+                    cited_sha = commit_match["sha"][:7].lower()
+                    cited_path = commit_match["path"]
+                    if cited_path is None:
+                        if any(sha7 == cited_sha for sha7, _ in commits):
+                            return True
+                    else:
+                        if (cited_sha, cited_path) in commits:
+                            return True
+                elif cite.lower() in others:
+                    return True
+        return False
+
+    out_lines: list[str] = []
+    converted_count = 0
+    for line in answer.splitlines():
+        fact_match = re.match(r"^(\s*(?:[-*+]\s+)?)(?:\[Fact\])(.*)$", line, re.IGNORECASE)
+        if fact_match:
+            prefix = fact_match.group(1)
+            rest = fact_match.group(2)
+            unrec_tokens = [
+                m.group(0)
+                for m in UNRECOGNISED_CITE_RE.finditer(rest)
+                if m.group(1).lower() not in VALID_CITATION_PREFIXES
+            ]
+            if unrec_tokens and not has_valid_id(rest):
+                converted_count += 1
+
+                def _strip_unrecognised(m: re.Match[str]) -> str:
+                    word = m.group(1).lower()
+                    if word not in VALID_CITATION_PREFIXES:
+                        return ""
+                    return m.group(0)
+
+                cleaned_rest = UNRECOGNISED_CITE_RE.sub(_strip_unrecognised, rest)
+                cleaned_rest = re.sub(r"\s+([.,;:!?])", r"\1", cleaned_rest)
+                cleaned_rest = re.sub(r"[ \t]+", " ", cleaned_rest).rstrip()
+                out_lines.append(f"{prefix}[Inferred]{cleaned_rest}")
+                continue
+        out_lines.append(line)
+
+    res = "\n".join(out_lines)
+    if answer.endswith("\n") and not res.endswith("\n"):
+        res += "\n"
+    return res, converted_count

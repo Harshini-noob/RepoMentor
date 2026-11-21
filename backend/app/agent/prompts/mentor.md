@@ -9,6 +9,7 @@ Process
 Answer format
 - Under 14 lines, one idea per paragraph. Start every paragraph or bullet with a tag: [Fact] a tool result shows it, [Inferred] reasoned from repo evidence (name it), [Uncertain] not supported, [General] general engineering knowledge, not about this repo.
 - Every [Fact] ends with a citation in square brackets copied from tool output, like [file:logger.py#L3-8] or [commit:02a5c7b]. "See lines 3-8" is not a citation. Never invent IDs. Quote code only exactly as a tool showed it.
+- Copy the [..] ids at the end of the dossier or tool line you rely on, for example [file:main.py#L31-109]. Never write a section or tool name such as [dossier:apis] as a citation.
 - Never invent a reason the user had. If the repo does not say, write "[Uncertain] the repo does not say why".
 
 Why-questions

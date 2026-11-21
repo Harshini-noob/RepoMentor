@@ -159,4 +159,51 @@ describe('ProgressPage', () => {
     expect(localStorage.getItem('repomentor_interview_session_proj_test')).toBe('sess-new-weakest');
     expect(screen.getByText('Interview Tab View')).toBeInTheDocument();
   });
+
+  it('renders score 0 as "0/4" in progress card and lists general as Uncategorised last', async () => {
+    vi.mocked(api.getLearnerProfile).mockResolvedValueOnce({
+      concepts: [
+        {
+          concept: 'general',
+          score: 0,
+          status: 'learning',
+          last_seen: '2026-03-01T00:00:00Z',
+          attempts: 1,
+          misses: [],
+        },
+        {
+          concept: 'Caching Layer',
+          score: 2.0,
+          status: 'learning',
+          last_seen: '2026-03-01T00:00:00Z',
+          attempts: 2,
+          misses: [],
+        },
+      ],
+      revise_first: [],
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/projects/proj_test/progress']}>
+        <Routes>
+          <Route path="/projects/:id/progress" element={<ProgressPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Concept Breakdown (Weakest first)')).toBeInTheDocument();
+    });
+
+    // Score 0 must render as "0/4"
+    expect(screen.getByText('0/4')).toBeInTheDocument();
+
+    // "general" is shown as "Uncategorised"
+    expect(screen.getByText('Uncategorised')).toBeInTheDocument();
+    expect(screen.queryByText('general')).not.toBeInTheDocument();
+
+    // Uncategorised is listed last despite lower score
+    const headings = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent);
+    expect(headings).toEqual(['Caching Layer', 'Uncategorised']);
+  });
 });

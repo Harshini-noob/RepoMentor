@@ -1321,3 +1321,62 @@ async def test_unverified_fenced_block_is_removed_after_failed_repair(
     assert invented_block not in run.final_answer
     assert "[code block removed: lines not found in any tool result]" in run.final_answer
     assert "[Quotes not found in any tool result:" in run.final_answer
+
+
+@pytest.mark.asyncio
+async def test_unrecognised_citation_triggers_repair_and_is_repaired(
+    mock_db: AsyncIOMotorDatabase,
+) -> None:
+    project_id = await seed_project_data(mock_db)
+    call_count = 0
+    repair_message_content = ""
+
+    async def fake_chat(messages, tools=None):
+        nonlocal call_count, repair_message_content
+        call_count += 1
+        if call_count == 1:
+            return LLMReply(
+                content="Reading the source file.",
+                tool_calls=[
+                    ToolCall(
+                        id="read-1",
+                        name="read_file",
+                        arguments={"path": "src/main.py", "start": 1, "end": 1},
+                    )
+                ],
+            )
+        if call_count == 2:
+            return LLMReply(
+                content="[Fact] POST /query is defined in main.py [dossier:apis].\n[Fact] It prints hello [file:src/main.py#L1-1].",
+                tool_calls=[],
+            )
+        assert tools is None
+        user_msgs = [m.get("content", "") for m in messages if m.get("role") == "user"]
+        repair_message_content = user_msgs[-1]
+        return LLMReply(
+            content="[Fact] POST /query is defined in main.py [dossier:apis].\n[Fact] It prints hello [file:src/main.py#L1-1].",
+            tool_calls=[],
+        )
+
+    run = await run_agent(
+        goal="Explain query endpoint",
+        project_id=project_id,
+        max_steps=4,
+        db=mock_db,
+        chat_fn=fake_chat,
+    )
+
+    assert call_count == 3
+    # [dossier:apis] triggered repair
+    assert [step.tool for step in run.steps].count("policy_repair") == 1
+    # Repair message lists the collected IDs
+    assert "Valid ids you can cite:" in repair_message_content
+    assert "file:src/main.py#L1-1" in repair_message_content
+    # After failed repair:
+    # 1. [Fact] line with [dossier:apis] becomes [Inferred] without [dossier:apis]
+    assert "[Inferred] POST /query is defined in main.py." in run.final_answer
+    assert "[dossier:apis]" not in run.final_answer
+    # 2. Valid [file:...] citation is untouched
+    assert "[Fact] It prints hello [file:src/main.py#L1-1]." in run.final_answer
+    # 3. Note "no valid citation" is appended
+    assert "[no valid citation]" in run.final_answer

@@ -16,9 +16,11 @@ from app.agent.evidence import (
     ANSWER_CHAR_MAP,
     count_tags,
     find_uncited_facts,
+    find_unrecognised_citations,
     find_unsupported_citations,
     find_unverified_quotes,
     remove_unverified_code_blocks,
+    repair_uncited_fact_lines,
 )
 
 from app.agent.guards import HISTORY_TOOLS, RepeatedCallGuard, is_why_question, should_warn_wrap_up
@@ -328,7 +330,8 @@ async def run_agent(
                     answer, tool_texts, evidence_ids=collected
                 )
                 uncited_facts = find_uncited_facts(answer)
-                repair_items = [*unsupported, *unverified_quotes][:5]
+                unrecognised = find_unrecognised_citations(answer)
+                repair_items = [*unsupported, *unverified_quotes, *unrecognised][:5]
                 if repair_items and not repair_done and step_idx < max_steps:
                     repair_done = True
                     repair_pending = True
@@ -350,6 +353,16 @@ async def run_agent(
                             + " | ".join(fact[:200] for fact in uncited_facts[:5])
                             + ". Add a citation from a tool result or change the tag to [Inferred]"
                         )
+                    collected_ordered: list[str] = []
+                    for s in reversed(steps):
+                        for eid in reversed(s.evidence_ids):
+                            if eid not in collected_ordered:
+                                collected_ordered.append(eid)
+                    valid_ids = collected_ordered[:10]
+                    if valid_ids:
+                        if repair_prompt:
+                            repair_prompt += "\n"
+                        repair_prompt += f"Valid ids you can cite: {', '.join(valid_ids)}."
                     messages.append({
                         "role": "user",
                         "content": repair_prompt,
@@ -591,6 +604,11 @@ async def run_agent(
                     final_answer, tool_texts, evidence_ids=collected
                 ),
             ]))
+            final_answer, converted_count = repair_uncited_fact_lines(
+                final_answer, evidence_ids=collected
+            )
+            if converted_count > 0 and "[no valid citation]" not in final_answer:
+                final_answer += "\n\n[no valid citation]"
         unsupported = find_unsupported_citations(final_answer, collected)
         if unsupported:
             final_answer += (

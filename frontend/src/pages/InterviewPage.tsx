@@ -717,11 +717,12 @@ export const InterviewPage: React.FC = () => {
                   {/* Retry Before/After Card */}
                   {evaluation.before !== null && evaluation.before !== undefined && (
                     <div className="retry-comparison-pill">
-                      {evaluation.copied ? (
-                        <span>copied from the lesson, not counted</span>
-                      ) : (
-                        <span>Before: {evaluation.before}/4 → After: {evaluation.after}/4</span>
-                      )}
+                      <span>
+                        Before: {evaluation.before}/4 → After:{' '}
+                        {evaluation.copied
+                          ? 'copied from the lesson (not counted)'
+                          : `${evaluation.after}/4`}
+                      </span>
                     </div>
                   )}
                 </div>
@@ -953,7 +954,11 @@ export const InterviewPage: React.FC = () => {
                             <td><span className="concept-chip">{row.concept || 'General'}</span></td>
                             <td>
                               <span className="score-value">
-                                {row.score !== null && row.score !== undefined ? `${row.score}/4` : 'Skipped'}
+                                {row.score !== null && row.score !== undefined
+                                  ? `${row.score}/4`
+                                  : (row as any).status === 'no_question'
+                                  ? 'No question'
+                                  : 'Skipped'}
                               </span>
                             </td>
                           </tr>
@@ -963,17 +968,21 @@ export const InterviewPage: React.FC = () => {
                   </div>
 
                   {/* Weakest Concepts & Revise List */}
-                  {((report?.weakest_concepts && report.weakest_concepts.length > 0) ||
-                    (currentAction?.summary?.weakest_concepts && currentAction.summary.weakest_concepts.length > 0)) && (
-                    <div className="weak-concepts-box">
-                      <h3 className="summary-section-title">Weakest Concepts</h3>
-                      <div className="chips-list">
-                        {(report?.weakest_concepts || currentAction?.summary?.weakest_concepts || []).map((c) => (
-                          <span key={c} className="concept-chip weak">{c}</span>
-                        ))}
+                  {(() => {
+                    const weakList = (report?.weakest_concepts || currentAction?.summary?.weakest_concepts || [])
+                      .filter((c) => c.toLowerCase() !== 'general');
+                    if (weakList.length === 0) return null;
+                    return (
+                      <div className="weak-concepts-box">
+                        <h3 className="summary-section-title">Weakest Concepts</h3>
+                        <div className="chips-list">
+                          {weakList.map((c) => (
+                            <span key={c} className="concept-chip weak">{c}</span>
+                          ))}
+                        </div>
                       </div>
-                    </div>
-                  )}
+                    );
+                  })()}
 
                   {/* Lessons given & before/after */}
                   {((report?.before_after && report.before_after.length > 0) ||
@@ -984,7 +993,12 @@ export const InterviewPage: React.FC = () => {
                         {(report?.before_after || currentAction?.summary?.before_after || []).map((ba, idx) => (
                           <div key={idx} className="before-after-item">
                             <span>Concept: <strong>{ba.concept || 'General'}</strong></span>
-                            <span>Before: {ba.before}/4 → After: {ba.after}/4</span>
+                            <span>
+                              Before: {ba.before}/4 → After:{' '}
+                              {ba.copied
+                                ? 'copied from the lesson (not counted)'
+                                : `${ba.after}/4`}
+                            </span>
                           </div>
                         ))}
                       </div>
@@ -1051,7 +1065,13 @@ export const InterviewPage: React.FC = () => {
                         <td>{row.round || 'tech'}</td>
                         <td>Level {row.difficulty || 2}</td>
                         <td><span className="concept-chip">{row.concept || 'General'}</span></td>
-                        <td>{row.score !== null && row.score !== undefined ? `${row.score}/4` : 'Skipped'}</td>
+                        <td>
+                          {row.score !== null && row.score !== undefined
+                            ? `${row.score}/4`
+                            : (row as any).status === 'no_question'
+                            ? 'No question'
+                            : 'Skipped'}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
