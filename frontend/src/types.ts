@@ -57,7 +57,7 @@ export interface DossierSummary {
   sections: DossierSectionSummary[];
 }
 
-export type ClaimTag = 'fact' | 'inferred' | 'uncertain';
+export type ClaimTag = 'fact' | 'inferred' | 'uncertain' | 'general';
 export type ClaimSource = 'static' | 'agent' | 'user';
 
 export interface DossierClaim {
@@ -172,4 +172,219 @@ export class ApiError extends Error {
     this.existing = existing;
     this.newCount = newCount;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8: Chat & Mentor Models
+// ---------------------------------------------------------------------------
+
+export interface ChatSessionSummaryItem {
+  session_id: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+  turns: number;
+  first_question: string;
+}
+
+export interface ChatMessageItem {
+  role: string;
+  content: string;
+  ts?: string | null;
+}
+
+export interface ChatSessionDetailResponse {
+  session_id: string;
+  created_at?: string | null;
+  messages: ChatMessageItem[];
+}
+
+export interface ChatStep {
+  step: number;
+  tool: string;
+  args: Record<string, any>;
+  preview: string;
+  evidence: string[];
+  ms: number;
+  tokens: number;
+}
+
+export type ChatStreamEvent =
+  | { type: 'session'; session_id: string }
+  | { type: 'event'; text: string }
+  | { type: 'step'; step: number; tool: string; args: Record<string, any>; preview: string; evidence: string[]; ms: number; tokens: number }
+  | { type: 'answer'; text: string; stop_reason: string; tokens: number }
+  | { type: 'error'; message: string }
+  | { type: 'done' };
+
+export interface ChatMessageUI {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  steps?: ChatStep[];
+  tokens?: number;
+  stop_reason?: string;
+  isError?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8: Interview Models
+// ---------------------------------------------------------------------------
+
+export interface InterviewPlanSlot {
+  slot: number;
+  concept?: string | null;
+  difficulty: number;
+  reason: string;
+  first_seed_claim?: string;
+  claim?: string;
+}
+
+export interface InterviewPlanResponse {
+  slots: InterviewPlanSlot[];
+}
+
+export interface InterviewSessionSummaryItem {
+  session_id: string;
+  status: string;
+  plan_mode: string;
+  created_at?: string | null;
+  answered: number;
+  answered_count: number;
+  average_score?: number | null;
+}
+
+export interface InterviewSessionCreateRequest {
+  questions: number;
+  difficulty: number;
+  adaptive: boolean;
+  teach: boolean;
+  teach_below?: number;
+  max_lessons?: number;
+}
+
+export interface InterviewSessionCreateResponse {
+  session_id: string;
+  plan: Array<Record<string, any>>;
+  status: string;
+}
+
+export interface InterviewPendingState {
+  kind: 'initial' | 'followup' | 'retry' | string;
+  question_id: string;
+  text?: string;
+}
+
+export interface InterviewStateResponse {
+  session_id: string;
+  stage: 'need_question' | 'awaiting_answer' | 'need_lesson' | 'need_followup' | 'need_retry' | 'finished' | string;
+  pending?: InterviewPendingState | null;
+  cycle?: Record<string, any> | null;
+  slot: number;
+  total: number;
+  status: string;
+  lessons_given: number;
+  max_lessons: number;
+}
+
+export interface InterviewReportRow {
+  round?: string;
+  difficulty?: number;
+  concept?: string;
+  score?: number | null;
+}
+
+export interface InterviewReportResponse {
+  answered: number;
+  skipped: number;
+  average_score?: number | null;
+  rows: InterviewReportRow[];
+  per_concept?: Record<string, any>;
+  concept_scores?: Record<string, any>;
+  weakest_concepts?: string[];
+  revise?: Array<Record<string, any>>;
+  unverified_count?: number;
+  lessons_given?: number;
+  before_after?: Array<Record<string, any>>;
+  average_improvement?: number | null;
+}
+
+export interface InterviewActionResponse {
+  action: 'question' | 'lesson' | 'finished' | string;
+  kind?: 'initial' | 'followup' | 'retry' | string | null;
+  question_id?: string | null;
+  text?: string | null;
+  slot?: number | null;
+  total?: number | null;
+  round?: string | null;
+  difficulty?: number | null;
+  concept?: string | null;
+  reason?: string | null;
+  notes?: string[] | null;
+  summary?: InterviewReportResponse | null;
+}
+
+export interface RubricPoint {
+  point: string;
+  kind?: 'repo' | 'general' | string;
+  status: 'covered' | 'partial' | 'missing' | string;
+  quote?: string;
+}
+
+export interface Misconception {
+  quote?: string;
+  why?: string;
+  seed_line?: string;
+}
+
+export interface UnverifiedStatement {
+  claim?: string;
+  statement?: string;
+  reason?: string;
+}
+
+export interface InterviewEvaluationResponse {
+  score?: number | null;
+  coverage?: number | null;
+  points?: RubricPoint[];
+  misconceptions?: Misconception[];
+  unverified?: UnverifiedStatement[];
+  strengths?: string[];
+  advice?: string;
+  notes?: string[];
+  role?: string;
+  next?: string;
+  copied?: boolean | null;
+  before?: number | null;
+  after?: number | null;
+}
+
+export interface InterviewSkipResponse {
+  action: string;
+  status: string;
+  stage: string;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8: Learner Profile Models
+// ---------------------------------------------------------------------------
+
+export interface ProfileMissItem {
+  point: string;
+  kind: string;
+  count: number;
+  last_seen?: string | null;
+}
+
+export interface ProfileConceptItem {
+  concept: string;
+  status: string;
+  score: number;
+  attempts: number;
+  last_seen?: string | null;
+  misses: ProfileMissItem[];
+}
+
+export interface ProfileResponse {
+  concepts: ProfileConceptItem[];
+  revise_first: string[];
 }

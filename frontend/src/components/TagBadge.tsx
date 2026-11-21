@@ -16,6 +16,9 @@ export const TagBadge: React.FC<TagBadgeProps> = ({ tag }) => {
   } else if (normalized === 'inferred') {
     label = 'Inferred';
     className = 'tag-badge inferred';
+  } else if (normalized === 'general') {
+    label = 'General';
+    className = 'tag-badge general';
   }
 
   return (

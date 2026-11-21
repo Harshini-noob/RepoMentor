@@ -4,6 +4,7 @@ import { getProject, getDossierSummary, getDossierSection, buildStaticDossier } 
 import { parseEvidenceId, filterClaims, countClaimsByTag } from "../lib/evidence";
 import { TagBadge } from "../components/TagBadge";
 import { EvidenceDrawer } from "../components/EvidenceDrawer";
+import { ProjectTabs } from "../components/ProjectTabs";
 import type { ProjectDetail, DossierSectionSummary, DossierClaim, ClaimTag } from "../types";
 
 export function formatSectionName(name: string): string {
@@ -252,57 +253,7 @@ export const DossierPage: React.FC = () => {
       </div>
 
       {/* Project Views Tabs */}
-      <div className="project-tabs" role="tablist" aria-label="Project Views">
-        <button
-          role="tab"
-          aria-selected="true"
-          className="project-tab-btn active"
-        >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
-            <polyline points="14 2 14 8 20 8" />
-          </svg>
-          Dossier
-        </button>
-        <button
-          role="tab"
-          aria-selected="false"
-          className="project-tab-btn"
-          disabled
-          title="Coming next"
-        >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-          </svg>
-          Chat <span className="tab-badge">coming next</span>
-        </button>
-        <button
-          role="tab"
-          aria-selected="false"
-          className="project-tab-btn"
-          disabled
-          title="Coming next"
-        >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10" />
-            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
-            <line x1="12" y1="17" x2="12.01" y2="17" />
-          </svg>
-          Interview <span className="tab-badge">coming next</span>
-        </button>
-        <button
-          role="tab"
-          aria-selected="false"
-          className="project-tab-btn"
-          disabled
-          title="Coming next"
-        >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-          </svg>
-          Progress <span className="tab-badge">coming next</span>
-        </button>
-      </div>
+      <ProjectTabs projectId={canonicalId} />
 
       {actionMessage && (
         <div className="banner banner-success">
